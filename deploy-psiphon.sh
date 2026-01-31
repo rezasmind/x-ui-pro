@@ -50,6 +50,10 @@ install_dependencies() {
         fi
     done
 
+    if ! command -v fuser &> /dev/null; then
+        install_list+=("psmisc")
+    fi
+
     if ! command -v ss &> /dev/null; then
         if command -v apt &> /dev/null; then
             install_list+=("iproute2")
@@ -138,6 +142,8 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$BASE_DIR/%i
+# Ensure ports are free before starting
+ExecStartPre=/bin/bash -c 'config=$BASE_DIR/%i/client.json; if [[ -f "$config" ]]; then ports=$(grep -oE "ProxyPort\": [0-9]+" "$config" | awk "{print \$2}"); for port in $ports; do fuser -k -n tcp "$port" || true; done; fi'
 ExecStart=$BASE_DIR/%i/psiphon-client -config client.json -formatNotices json
 Restart=always
 RestartSec=5
