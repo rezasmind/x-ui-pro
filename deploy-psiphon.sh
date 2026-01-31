@@ -339,7 +339,7 @@ EOF
         }
 EOF
         
-        # Create systemd service with proper settings
+        # Create systemd service - Pure Psiphon (cfon) mode configuration
         cat > "/etc/systemd/system/${service_name}.service" << EOF
 [Unit]
 Description=Psiphon Instance on Port $port ($country) - X-UI-PRO
@@ -353,13 +353,16 @@ User=root
 WorkingDirectory=$WARP_DIR
 Environment="HOME=/root"
 
-# Main execution with scan for better endpoint discovery
-ExecStart=$WARP_BIN --scan --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
+# Pure Psiphon (cfon) mode without WARP scanning or chaining
+# --cfon: Enable Psiphon mode with specific country
+# --bind: SOCKS5 proxy address
+# --cache-dir: Unique profile storage per instance
+ExecStart=$WARP_BIN --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
 
 # Graceful shutdown
 ExecStop=/bin/kill -TERM \$MAINPID
 
-# Restart configuration - longer delays to avoid API rate limits
+# Restart configuration with backoff
 Restart=always
 RestartSec=60
 StartLimitInterval=600

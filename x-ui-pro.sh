@@ -534,13 +534,16 @@ User=root
 WorkingDirectory=/etc/warp-plus/
 Environment="HOME=/root"
 
-# Main execution with --scan for better endpoint discovery
-ExecStart=/etc/warp-plus/warp-plus --scan --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
+# Pure Psiphon (cfon) mode without WARP scanning or chaining
+# --cfon: Enable Psiphon mode with specific country
+# --bind: SOCKS5 proxy address
+# --cache-dir: Unique profile storage per instance
+ExecStart=/etc/warp-plus/warp-plus --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
 
 # Graceful shutdown
 ExecStop=/bin/kill -TERM \$MAINPID
 
-# Restart on failure with longer backoff to avoid API rate limits
+# Restart configuration with backoff
 Restart=always
 RestartSec=60
 StartLimitInterval=600
