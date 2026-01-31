@@ -170,7 +170,7 @@ sudo bash -c 'type apt&&{ apt update&&apt install -y build-essential; }||type dn
 sudo $Pak -y purge sqlite sqlite3 python3-certbot-nginx 2>/dev/null || true
 [[ $Pak == *apt ]]&&sudo apt update||sudo dnf makecache
 
-for p in epel-release cronie psmisc unzip curl nginx nginx-full python3 certbot python3-certbot-nginx sqlite sqlite3 jq openssl tor tor-geoipdb;do
+for p in epel-release cronie psmisc unzip curl nginx nginx-full python3 certbot python3-certbot-nginx python3-certbot-dns-cloudflare sqlite sqlite3 jq openssl tor tor-geoipdb;do
   (command -v dpkg&>/dev/null && dpkg -l $p&>/dev/null)||(rpm -q $p&>/dev/null)||sudo $Pak -y install $p
 done
 
@@ -198,7 +198,18 @@ IP6=$(ip route get 2620:fe::fe 2>&1 | grep -Po -- 'src \K\S*')
 [[ $IP4 =~ $IP4_REGEX ]] || IP4=$(curl -s ipv4.icanhazip.com);
 [[ $IP6 =~ $IP6_REGEX ]] || IP6=$(curl -s ipv6.icanhazip.com);
 ##############################Install SSL################################################################
-certbot certonly --standalone --non-interactive --force-renewal --agree-tos --register-unsafely-without-email --cert-name "$MainDomain" -d "$domain"
+UseCloudflareCert="n"
+read -p $'\e[1;32;40m Do you want to use Cloudflare DNS for SSL certificate? (y/n): \e[0m' UseCloudflareCert
+if [[ "$UseCloudflareCert" == "y" ]]; then
+    read -p $'\e[1;32;40m Enter Cloudflare Email: \e[0m' CF_Email
+    read -p $'\e[1;32;40m Enter Cloudflare API Token: \e[0m' CF_Token
+    mkdir -p ~/.secrets/certbot
+    echo "dns_cloudflare_api_token = $CF_Token" > ~/.secrets/certbot/cloudflare.ini
+    chmod 600 ~/.secrets/certbot/cloudflare.ini
+    certbot certonly --dns-cloudflare --dns-cloudflare-credentials ~/.secrets/certbot/cloudflare.ini --dns-cloudflare-propagation-seconds 60 --non-interactive --agree-tos --email "$CF_Email" --cert-name "$MainDomain" -d "$domain"
+else
+    certbot certonly --standalone --non-interactive --force-renewal --agree-tos --register-unsafely-without-email --cert-name "$MainDomain" -d "$domain"
+fi
 if [[ ! -d "/etc/letsencrypt/live/${MainDomain}/" ]]; then
  	systemctl start nginx >/dev/null 2>&1
 	msg_err "$MainDomain SSL failed! Check Domain/IP! Exceeded limit!? Try another domain or VPS!" && exit 1
@@ -436,6 +447,54 @@ esac
 
 wget --quiet -P /etc/warp-plus/ "${wppDL}" || curl --output-dir /etc/warp-plus/ -LOs "${wppDL}" 
 find "/etc/warp-plus/" -name '*.zip' | xargs -I {} sh -c 'unzip -d "$0" "{}" && rm -f "{}"' "/etc/warp-plus/"
+MultiPsiphon="n"
+read -p $'\e[1;32;40m Do you want to deploy 5 concurrent Psiphon instances (Multi-Port 8080-8084)? (y/n): \e[0m' MultiPsiphon
+
+if [[ "$MultiPsiphon" == "y" ]]; then
+    PORTS=(8080 8081 8082 8083 8084)
+    declare -A INSTANCE_COUNTRIES
+    msg_inf "Please select a country for each instance (2-letter code, e.g., US, DE, GB)."
+    msg_inf "Available: AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US"
+    
+    for port in "${PORTS[@]}"; do
+        while true; do
+            read -p "Enter country for Port $port (default: US): " country
+            country=${country:-US}
+            country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+            if [[ "$country" =~ ^[A-Z]{2}$ ]]; then
+                INSTANCE_COUNTRIES[$port]=$country
+                break
+            else
+                msg_err "Invalid country code."
+            fi
+        done
+    done
+
+    for port in "${PORTS[@]}"; do
+        country=${INSTANCE_COUNTRIES[$port]}
+        service_name="psiphon-${port}"
+        cache_dir="/var/cache/psiphon-${port}"
+        mkdir -p "$cache_dir"
+        
+        cat > "/etc/systemd/system/${service_name}.service" <<EOF
+[Unit]
+Description=Psiphon Instance on Port $port ($country)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/warp-plus/
+ExecStart=/etc/warp-plus/warp-plus --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    done
+else
 cat > /etc/systemd/system/warp-plus.service << EOF
 [Unit]
 Description=warp-plus service
@@ -451,18 +510,28 @@ Restart=on-abort
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 ##########################################Install v2ray-core + v2rayA-webui#############################
 sudo sh -c "$(wget -qO- https://github.com/v2rayA/v2rayA-installer/raw/main/installer.sh)" @ --with-xray
-service_enable "v2raya" "warp-plus"
-######################cronjob for ssl/reload service/cloudflareips######################################
 tasks=(
-  "0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya warp-plus tor'"
   "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
   "0 0 1 * * sudo su -c 'certbot renew --nginx --force-renewal --non-interactive --post-hook \"nginx -s reload\"' >> /var/log/certbot_renew.log 2>&1"
-  "* * * * * sudo su -c '[[ \"\$(curl -s --socks5-hostname 127.0.0.1:8086 checkip.amazonaws.com)\" =~ ^((([0-9]{1,3}\.){3}[0-9]{1,3})|(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}))\$ ]] || systemctl restart warp-plus'"
   "0 0 * * 0 sudo bash /etc/nginx/cloudflareips.sh > /dev/null 2>&1"
   "0 2 * * * mkdir -p /var/backups && cp /etc/x-ui/x-ui.db /var/backups/x-ui.db.$(date +\%F-\%H-\%M-\%S) && find /var/backups -name \"x-ui.db.*\" -mtime +7 -delete"
 )
+
+if [[ "$MultiPsiphon" == "y" ]]; then
+    service_enable "v2raya" "psiphon-8080" "psiphon-8081" "psiphon-8082" "psiphon-8083" "psiphon-8084"
+    tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya psiphon-8080 psiphon-8081 psiphon-8082 psiphon-8083 psiphon-8084 tor'")
+    for p in 8080 8081 8082 8083 8084; do
+        tasks+=("* * * * * sudo su -c '[[ \"\$(curl -s --socks5-hostname 127.0.0.1:$p checkip.amazonaws.com)\" =~ ^((([0-9]{1,3}\.){3}[0-9]{1,3})|(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}))\$ ]] || systemctl restart psiphon-$p'")
+    done
+else
+    service_enable "v2raya" "warp-plus"
+    tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya warp-plus tor'")
+    tasks+=("* * * * * sudo su -c '[[ \"\$(curl -s --socks5-hostname 127.0.0.1:8086 checkip.amazonaws.com)\" =~ ^((([0-9]{1,3}\.){3}[0-9]{1,3})|(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}))\$ ]] || systemctl restart warp-plus'")
+fi
+######################cronjob for ssl/reload service/cloudflareips######################################
 crontab -l | grep -qE "x-ui" || { printf "%s\n" "${tasks[@]}" | crontab -; }
 ##################################Show Details##########################################################
 sudo /usr/local/x-ui/x-ui setting -username "$XUIUSER" -password "$XUIPASS"
@@ -492,6 +561,21 @@ if systemctl is-active --quiet x-ui || command -v x-ui &> /dev/null; then clear
 	msg_inf "XrayUI: https://${domain}${RNDSTR}"
 	msg_inf "V2rayA: https://${domain}/${RNDSTR2}/\n"
 	msg "Username: $XUIUSER\n Password: $XUIPASS"
+	if [[ "$MultiPsiphon" == "y" ]]; then
+        hrline
+        msg_inf "Psiphon Instances Status:"
+        printf "%-10s %-15s %-10s\n" "Port" "IP" "Country"
+        for p in 8080 8081 8082 8083 8084; do
+             ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$p -s https://ipapi.co/json 2>/dev/null)
+             if [[ -n "$ip_info" ]]; then
+                 ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "$ip_info" | grep -o '"ip": *"[^"]*"' | cut -d'"' -f4)
+                 country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "$ip_info" | grep -o '"country_code": *"[^"]*"' | cut -d'"' -f4)
+                 printf "%-10s %-15s %-10s\n" "$p" "$ip" "$country"
+             else
+                 printf "%-10s %-15s %-10s\n" "$p" "DOWN" "-"
+             fi
+        done
+    fi
 	hrline
 	msg_war "Note: Save This Screen!"	
 else
