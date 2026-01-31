@@ -87,7 +87,60 @@ clean_old_instances() {
               pid=$(ss -lptn "sport = :$port" | grep -oP 'pid=\K\d+' || true)
               if [[ -n "$pid" ]]; then kill -9 $pid 2>/dev/null || true; fi
          fi
+     done
+}
+
+verify_ports_free() {
+    log_info "Verifying ports are free..."
+    local all_free=true
+    
+    for port in "${PORTS[@]}"; do
+        # Check if port is in use
+        if ss -lnt "sport = :$port" | grep -q ":$port"; then
+            log_warn "Port $port is still in use!"
+            all_free=false
+            
+            # Try to find and kill what's using it
+            log_info "Attempting to free port $port..."
+            
+            # Kill via fuser
+            fuser -k "${port}/tcp" 2>/dev/null || true
+            
+            # Kill via lsof
+            if command -v lsof &> /dev/null; then
+                pids=$(lsof -ti :$port 2>/dev/null || true)
+                if [[ -n "$pids" ]]; then
+                    echo "$pids" | xargs -r kill -9 2>/dev/null || true
+                fi
+            fi
+            
+            # Kill via ss
+            pid=$(ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1 || true)
+            if [[ -n "$pid" ]]; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            
+            # Wait a moment
+            sleep 1
+        fi
     done
+    
+    if [[ "$all_free" == "false" ]]; then
+        log_warn "Some ports were in use. Retrying cleanup..."
+        sleep 2
+        
+        # Final check
+        for port in "${PORTS[@]}"; do
+            if ss -lnt "sport = :$port" | grep -q ":$port"; then
+                log_error "Port $port is STILL in use after cleanup!"
+                log_info "Processes on port $port:"
+                ss -lptn "sport = :$port" 2>/dev/null || true
+                lsof -i :$port 2>/dev/null || true
+            fi
+        done
+    else
+        log_success "All ports are free."
+    fi
 }
 
 deploy_containers() {
@@ -221,6 +274,7 @@ main() {
 
     install_docker
     clean_old_instances
+    verify_ports_free
     deploy_containers
     verify_deployment
     
