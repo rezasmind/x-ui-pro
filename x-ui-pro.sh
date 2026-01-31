@@ -202,9 +202,20 @@ UseCloudflareCert="n"
 read -p $'\e[1;32;40m Do you want to use Cloudflare DNS for SSL certificate? (y/n): \e[0m' UseCloudflareCert
 if [[ "$UseCloudflareCert" == "y" ]]; then
     read -p $'\e[1;32;40m Enter Cloudflare Email: \e[0m' CF_Email
-    read -p $'\e[1;32;40m Enter Cloudflare API Token: \e[0m' CF_Token
+    read -p $'\e[1;32;40m Enter Cloudflare API Token (or Global API Key): \e[0m' CF_Key_Input
+    CF_Key_Input=$(echo "$CF_Key_Input" | tr -d '[:space:]')
     mkdir -p ~/.secrets/certbot
-    echo "dns_cloudflare_api_token = $CF_Token" > ~/.secrets/certbot/cloudflare.ini
+    
+    # Check if it looks like a Global API Key (37 hex chars)
+    if [[ "${#CF_Key_Input}" -eq 37 && "$CF_Key_Input" =~ ^[0-9a-fA-F]+$ ]]; then
+        echo "dns_cloudflare_email = $CF_Email" > ~/.secrets/certbot/cloudflare.ini
+        echo "dns_cloudflare_api_key = $CF_Key_Input" >> ~/.secrets/certbot/cloudflare.ini
+        msg_inf "Detected Cloudflare Global API Key."
+    else
+        echo "dns_cloudflare_api_token = $CF_Key_Input" > ~/.secrets/certbot/cloudflare.ini
+        msg_inf "Detected Cloudflare API Token."
+    fi
+    
     chmod 600 ~/.secrets/certbot/cloudflare.ini
     certbot certonly --dns-cloudflare --dns-cloudflare-credentials ~/.secrets/certbot/cloudflare.ini --dns-cloudflare-propagation-seconds 60 --non-interactive --agree-tos --email "$CF_Email" --cert-name "$MainDomain" -d "$domain"
 else
