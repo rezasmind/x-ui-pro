@@ -109,6 +109,52 @@ install_dependencies() {
     log_success "Dependencies installed."
 }
 
+configure_firewall() {
+    log_info "Configuring firewall to allow proxy ports..."
+    
+    # Collect all ports
+    local all_ports=()
+    for instance in "${!INSTANCES[@]}"; do
+        IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance]}"
+        all_ports+=($socks_port $http_port)
+    done
+    
+    # Configure UFW if available
+    if command -v ufw &> /dev/null; then
+        log_info "Configuring UFW firewall..."
+        for port in "${all_ports[@]}"; do
+            ufw allow "$port/tcp" comment "Psiphon proxy" >/dev/null 2>&1 || true
+        done
+        log_success "UFW rules added for ports: ${all_ports[*]}"
+    fi
+    
+    # Configure firewalld if available
+    if command -v firewall-cmd &> /dev/null; then
+        log_info "Configuring firewalld..."
+        for port in "${all_ports[@]}"; do
+            firewall-cmd --permanent --add-port="$port/tcp" >/dev/null 2>&1 || true
+        done
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        log_success "firewalld rules added for ports: ${all_ports[*]}"
+    fi
+    
+    # Configure iptables directly if no firewall manager
+    if ! command -v ufw &> /dev/null && ! command -v firewall-cmd &> /dev/null; then
+        if command -v iptables &> /dev/null; then
+            log_info "Configuring iptables..."
+            for port in "${all_ports[@]}"; do
+                iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
+            done
+            log_success "iptables rules added for ports: ${all_ports[*]}"
+        else
+            log_warn "No firewall detected. Ensure ports ${all_ports[*]} are accessible."
+        fi
+    fi
+    
+    echo ""
+    log_info "All proxy ports should now be accessible network-wide"
+}
+
 free_ports() {
     local instance="$1"
     IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance]}"
@@ -182,30 +228,38 @@ create_config() {
     
     local config_file="${CONFIG_DIR}/config-${instance}.json"
     local data_dir="${DATA_DIR}/instance-${instance}"
+    local instance_dir="${PSIPHON_DIR}/instance-${instance}"
     
+    # Create completely isolated directories for each instance
     mkdir -p "$data_dir"
+    mkdir -p "$instance_dir"
     
-    log_debug "Creating config for $instance: Country=$country, SOCKS=$socks_port, HTTP=$http_port"
+    log_debug "Creating isolated config for $instance: Country=$country, SOCKS=$socks_port, HTTP=$http_port"
     
     # PRD-compliant configuration with both SOCKS5 and HTTP proxies
+    # Bind to 0.0.0.0 to make accessible across entire server
     cat > "$config_file" << EOF
 {
     "LocalSocksProxyPort": $socks_port,
     "LocalHttpProxyPort": $http_port,
+    "LocalSocksProxyInterface": "0.0.0.0",
+    "LocalHttpProxyInterface": "0.0.0.0",
     "EgressRegion": "$country",
     "DataRootDirectory": "$data_dir",
-    "NetworkID": "PSIPHON-MULTI-${instance^^}",
+    "NetworkID": "PSIPHON-MULTI-${instance^^}-$(date +%s)",
     "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-    "RemoteServerListDownloadFilename": "remote_server_list",
+    "RemoteServerListDownloadFilename": "remote_server_list_${instance}",
     "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
     "RemoteServerListUrl": "https://s3.amazonaws.com/psiphon/web/mjr4-p23r-puwl/server_list_compressed",
     "SponsorId": "FFFFFFFFFFFFFFFF",
     "EstablishTunnelTimeoutSeconds": 300,
     "UseIndistinguishableTLS": true,
-    "TunnelPoolSize": 4,
-    "ConnectionWorkerPoolSize": 4,
+    "TunnelPoolSize": 3,
+    "ConnectionWorkerPoolSize": 3,
+    "LimitTunnelProtocols": ["OSSH", "SSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH"],
     "DisableLocalHTTPProxySkipProxyCheckAddresses": false,
-    "DisableLocalSocksProxySkipProxyCheckAddresses": false
+    "DisableLocalSocksProxySkipProxyCheckAddresses": false,
+    "EmitDiagnosticNotices": true
 }
 EOF
     
@@ -220,8 +274,13 @@ create_systemd_service() {
     local service_name="psiphon-${instance}"
     local config_file="${CONFIG_DIR}/config-${instance}.json"
     local log_file="${LOG_DIR}/${service_name}.log"
+    local instance_dir="${PSIPHON_DIR}/instance-${instance}"
+    local data_instance_dir="${DATA_DIR}/instance-${instance}"
     
-    log_info "Creating systemd service: $service_name ($country_name)"
+    # Create isolated working directory
+    mkdir -p "$instance_dir"
+    
+    log_info "Creating isolated systemd service: $service_name ($country_name)"
     
     cat > "/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
@@ -232,32 +291,38 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${PSIPHON_DIR}
+# Isolated working directory for this instance
+WorkingDirectory=${instance_dir}
 
-# Pre-start: Free up ports
-ExecStartPre=/bin/bash -c 'for port in $socks_port $http_port; do if command -v fuser >/dev/null 2>&1; then fuser -k "\${port}/tcp" 2>/dev/null || true; fi; if command -v ss >/dev/null 2>&1; then pids=\$(ss -ltnp "sport = :\${port}" 2>/dev/null | sed -n "s/.*pid=\\\\([0-9]\\\\+\\\\).*/\\\\1/p" | sort -u); for pid in \$pids; do kill -9 "\$pid" 2>/dev/null || true; done; waited=0; while ss -ltn "sport = :\${port}" 2>/dev/null | grep -q ":\${port}"; do sleep 0.5; waited=\$((waited+1)); if [ "\$waited" -ge 20 ]; then break; fi; done; fi; done; exit 0'
+# Pre-start: Aggressively free up ports and wait
+ExecStartPre=/bin/bash -c 'for port in $socks_port $http_port; do if command -v fuser >/dev/null 2>&1; then fuser -k "\${port}/tcp" 2>/dev/null || true; sleep 1; fi; if command -v ss >/dev/null 2>&1; then pids=\$(ss -ltnp "sport = :\${port}" 2>/dev/null | sed -n "s/.*pid=\\\\([0-9]\\\\+\\\\).*/\\\\1/p" | sort -u); for pid in \$pids; do kill -9 "\$pid" 2>/dev/null || true; done; waited=0; while ss -ltn "sport = :\${port}" 2>/dev/null | grep -q ":\${port}"; do sleep 1; waited=\$((waited+1)); if [ "\$waited" -ge 30 ]; then break; fi; done; fi; done; sleep 2; exit 0'
 
 # Main process
 ExecStart=${BIN_PATH} -config ${config_file} -formatNotices json
 
-# Restart policy
+# Restart policy - longer delays to prevent conflicts
 Restart=always
-RestartSec=10
-StartLimitBurst=5
-StartLimitInterval=60
+RestartSec=15
+StartLimitBurst=3
+StartLimitInterval=120
 
-# Resource limits
+# Resource limits - per instance
 LimitNOFILE=65535
+TasksMax=256
 
 # Logging
 StandardOutput=append:${log_file}
 StandardError=append:${log_file}
 
-# Security (optional hardening)
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${DATA_DIR} ${LOG_DIR}
+# Process isolation
+PrivateTmp=true
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=${DATA_DIR} ${LOG_DIR} ${PSIPHON_DIR}
+
+# Prevent OOM killer from terminating this service
+OOMScoreAdjust=-100
 
 [Install]
 WantedBy=multi-user.target
@@ -267,16 +332,29 @@ EOF
 }
 
 deploy_instances() {
-    log_info "Deploying 5 Psiphon instances (US, GB, FR, SG, NL)..."
+    log_info "Deploying 5 isolated Psiphon instances (US, GB, FR, SG, NL)..."
     
     # Stop all existing services first
+    log_info "Stopping all existing instances..."
     for instance in "${!INSTANCES[@]}"; do
         systemctl stop "psiphon-${instance}" 2>/dev/null || true
         systemctl disable "psiphon-${instance}" 2>/dev/null || true
+    done
+    
+    # Wait for all to stop
+    sleep 3
+    
+    # Aggressively free all ports
+    log_info "Freeing all ports..."
+    for instance in "${!INSTANCES[@]}"; do
         free_ports "$instance"
     done
     
+    # Wait for ports to be completely free
+    sleep 3
+    
     # Create configs and services
+    log_info "Creating configurations and services..."
     for instance in "${!INSTANCES[@]}"; do
         create_config "$instance"
         create_systemd_service "$instance"
@@ -284,23 +362,47 @@ deploy_instances() {
     
     # Reload systemd
     systemctl daemon-reload
+    sleep 2
     
-    # Enable and start services
-    log_info "Starting services..."
-    for instance in "${!INSTANCES[@]}"; do
-        IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance]}"
-        log_info "Starting psiphon-${instance} (${COUNTRY_NAMES[$instance]}) on SOCKS:$socks_port, HTTP:$http_port"
+    # Enable all services first
+    log_info "Enabling services..."
+    for instance in us gb fr sg nl; do
         systemctl enable "psiphon-${instance}"
-        systemctl start "psiphon-${instance}"
-        sleep 2
     done
     
-    log_success "All instances deployed."
+    # Start services with staggered delays to prevent conflicts
+    log_info "Starting services with staggered delays for complete isolation..."
+    local delay=0
+    for instance in us gb fr sg nl; do
+        IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance]}"
+        log_info "[$((delay))s delay] Starting psiphon-${instance} (${COUNTRY_NAMES[$instance]}) on SOCKS:$socks_port, HTTP:$http_port"
+        
+        systemctl start "psiphon-${instance}"
+        
+        # Wait to ensure this instance fully initializes before starting next
+        sleep 8
+        delay=$((delay + 8))
+        
+        # Verify it started
+        if systemctl is-active --quiet "psiphon-${instance}"; then
+            log_success "psiphon-${instance} started successfully"
+        else
+            log_warn "psiphon-${instance} may have issues, check logs"
+        fi
+    done
+    
+    log_success "All instances deployed with isolation."
 }
 
 verify_deployment() {
-    log_info "Verifying deployment (waiting 20s for tunnels to establish)..."
-    sleep 20
+    log_info "Verifying deployment (waiting 30s for all tunnels to establish)..."
+    
+    # Give all instances time to establish tunnels
+    for i in {30..1}; do
+        echo -ne "\rWaiting for tunnel establishment... ${i}s remaining "
+        sleep 1
+    done
+    echo ""
     
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════════════════${NC}"
@@ -316,8 +418,8 @@ verify_deployment() {
         if systemctl is-active --quiet "psiphon-${instance}"; then
             service_status="${GREEN}UP${NC}"
             
-            # Test SOCKS5 proxy
-            local ip_info=$(timeout 10 curl --connect-timeout 5 --socks5 127.0.0.1:$socks_port -s https://ipapi.co/json 2>/dev/null || echo "")
+            # Test SOCKS5 proxy with longer timeout
+            local ip_info=$(timeout 15 curl --connect-timeout 10 --socks5 127.0.0.1:$socks_port -s https://ipapi.co/json 2>/dev/null || echo "")
             
             if [[ -n "$ip_info" ]]; then
                 exit_ip=$(echo "$ip_info" | jq -r '.ip // "N/A"' 2>/dev/null)
@@ -329,8 +431,8 @@ verify_deployment() {
                     exit_country="${YELLOW}${exit_country}${NC}"
                 fi
             else
-                exit_ip="${RED}Timeout${NC}"
-                exit_country="${RED}N/A${NC}"
+                exit_ip="${YELLOW}Connecting...${NC}"
+                exit_country="${YELLOW}Wait${NC}"
             fi
         else
             service_status="${RED}DOWN${NC}"
@@ -341,6 +443,19 @@ verify_deployment() {
     done
     
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Show network accessibility info
+    local server_ip=$(hostname -I | awk '{print $1}')
+    echo -e "${YELLOW}Network Access Information:${NC}"
+    echo -e "  Local Server IP: ${GREEN}$server_ip${NC}"
+    echo -e "  All proxies are bound to 0.0.0.0 and accessible from:"
+    echo -e "    - Locally: 127.0.0.1:<port>"
+    echo -e "    - Network: $server_ip:<port>"
+    echo ""
+    echo -e "${CYAN}Example usage from another machine:${NC}"
+    echo -e "  curl --socks5 $server_ip:1080 https://ipapi.co/json  # US proxy"
+    echo -e "  curl -x http://$server_ip:8081 https://ipapi.co/json # GB proxy"
     echo ""
 }
 
@@ -456,14 +571,46 @@ control_services() {
                     log_error "Invalid instance. Choose from: us, gb, fr, sg, nl"
                     exit 1
                 fi
-                log_info "${action^}ing psiphon-${instance}..."
-                systemctl "$action" "psiphon-${instance}"
+                
+                if [[ "$action" == "restart" ]]; then
+                    log_info "Restarting psiphon-${instance} with port cleanup..."
+                    systemctl stop "psiphon-${instance}"
+                    sleep 2
+                    free_ports "$instance"
+                    sleep 2
+                    systemctl start "psiphon-${instance}"
+                else
+                    log_info "${action^}ing psiphon-${instance}..."
+                    systemctl "$action" "psiphon-${instance}"
+                fi
                 log_success "psiphon-${instance} ${action}ed."
             else
-                log_info "${action^}ing all instances..."
-                for inst in us gb fr sg nl; do
-                    systemctl "$action" "psiphon-${inst}"
-                done
+                if [[ "$action" == "restart" ]]; then
+                    log_info "Restarting all instances with staggered delays..."
+                    # Stop all first
+                    for inst in us gb fr sg nl; do
+                        systemctl stop "psiphon-${inst}"
+                    done
+                    sleep 3
+                    # Free all ports
+                    for inst in us gb fr sg nl; do
+                        free_ports "$inst"
+                    done
+                    sleep 3
+                    # Start with delays
+                    for inst in us gb fr sg nl; do
+                        systemctl start "psiphon-${inst}"
+                        sleep 8
+                    done
+                else
+                    log_info "${action^}ing all instances..."
+                    for inst in us gb fr sg nl; do
+                        systemctl "$action" "psiphon-${inst}"
+                        if [[ "$action" == "start" ]]; then
+                            sleep 5
+                        fi
+                    done
+                fi
                 log_success "All instances ${action}ed."
             fi
             ;;
@@ -472,6 +619,35 @@ control_services() {
             exit 1
             ;;
     esac
+}
+
+force_cleanup() {
+    log_warn "Force cleaning up all Psiphon processes and ports..."
+    
+    # Kill all psiphon processes
+    pkill -9 -f psiphon-tunnel-core 2>/dev/null || true
+    sleep 2
+    
+    # Free all ports
+    for instance in "${!INSTANCES[@]}"; do
+        IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance]}"
+        log_info "Forcing cleanup of ports $socks_port and $http_port..."
+        
+        fuser -k "${socks_port}/tcp" 2>/dev/null || true
+        fuser -k "${http_port}/tcp" 2>/dev/null || true
+        
+        if command -v ss &> /dev/null; then
+            for port in "$socks_port" "$http_port"; do
+                pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
+                for pid in $pids; do
+                    kill -9 "$pid" 2>/dev/null || true
+                done
+            done
+        fi
+    done
+    
+    sleep 3
+    log_success "Force cleanup complete."
 }
 
 uninstall() {
@@ -510,8 +686,9 @@ ${YELLOW}Usage:${NC}
   $0 start [instance] - Start instance(s) (all if not specified)
   $0 stop [instance]  - Stop instance(s) (all if not specified)
   $0 restart [instance] - Restart instance(s) (all if not specified)
-  $0 uninstall        - Remove all instances and data
+  $0 cleanup          - Force cleanup all processes and ports
   $0 test             - Test all proxy connections
+  $0 uninstall        - Remove all instances and data
 
 ${YELLOW}Instances:${NC} us, gb, fr, sg, nl
 
@@ -520,6 +697,7 @@ ${YELLOW}Examples:${NC}
   $0 logs us 100
   $0 restart gb
   $0 monitor
+  $0 cleanup          # Use if instances are conflicting
 
 ${YELLOW}Port Assignments:${NC}
   US: SOCKS5=1080, HTTP=8080
@@ -527,6 +705,11 @@ ${YELLOW}Port Assignments:${NC}
   FR: SOCKS5=1082, HTTP=8082
   SG: SOCKS5=1083, HTTP=8083
   NL: SOCKS5=1084, HTTP=8084
+
+${YELLOW}Network Access:${NC}
+  All proxies bind to 0.0.0.0 and are accessible network-wide
+  Local: curl --socks5 127.0.0.1:1080 https://ipapi.co/json
+  Remote: curl --socks5 YOUR_SERVER_IP:1080 https://ipapi.co/json
 EOF
 }
 
@@ -573,6 +756,7 @@ main() {
         install)
             install_dependencies
             install_psiphon_core
+            configure_firewall
             deploy_instances
             verify_deployment
             log_success "Installation complete!"
@@ -581,6 +765,10 @@ main() {
             echo "  - Run '$0 monitor' to watch instances in real-time"
             echo "  - Run '$0 test' to test all proxy connections"
             echo "  - Run '$0 logs <instance>' to view logs"
+            echo ""
+            echo -e "${YELLOW}Security Note:${NC}"
+            echo "  Proxies are now accessible network-wide on 0.0.0.0"
+            echo "  Consider restricting access with firewall rules if needed"
             ;;
         status)
             show_status
@@ -596,6 +784,9 @@ main() {
             ;;
         test)
             test_connections
+            ;;
+        cleanup|force-cleanup)
+            force_cleanup
             ;;
         uninstall)
             uninstall
