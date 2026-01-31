@@ -34,9 +34,6 @@ while [ "$#" -gt 0 ]; do
   	-ufw) ENABLEUFW="$2"; shift 2;;
 	-secure) Secure="$2"; shift 2;;
 	-TorCountry) TorCountry="$2"; shift 2;;
-	-WarpCfonCountry) WarpCfonCountry="$2"; shift 2;;
-	-WarpLicKey) WarpLicKey="$2"; shift 2;;
-	-CleanKeyCfon) CleanKeyCfon="$2"; shift 2;;
 	-RandomTemplate) RNDTMPL="$2"; shift 2;;
 	-Uninstall) UNINSTALL="$2"; shift 2;;
 	-panel) PNLNUM="$2"; shift 2;;
@@ -79,37 +76,6 @@ if [[ -n "$TorCountry" ]]; then
 	msg "\nEnter after 10 seconds:\ncurl --socks5-hostname 127.0.0.1:9050 https://ipapi.co/json/\n"
 	msg_inf "Tor settings changed!"
 	exit 1
-fi
-##############################WARP/Psiphon Change Region Country ############################################
-if [[ -n "$WarpCfonCountry" || -n "$WarpLicKey" || -n "$CleanKeyCfon" ]]; then
-WarpCfonCountry=$(echo "$WarpCfonCountry" | tr '[:lower:]' '[:upper:]')
-cfonval=" --cfon --country $WarpCfonCountry";
-[[ "$WarpCfonCountry" == "XX" ]] && cfonval=" --cfon --country ${Random_country}"
-[[ "$WarpCfonCountry" =~ ^[A-Z]{2}$ ]] || cfonval="";
-wrpky=" --key $WarpLicKey";[[ -n "$WarpLicKey" ]] || wrpky="";
-[[ -n "$CleanKeyCfon" ]] && { cfonval=""; wrpky=""; }
-######
-cat > /etc/systemd/system/warp-plus.service << EOF
-[Unit]
-Description=warp-plus service
-After=network.target nss-lookup.target
-
-[Service]
-WorkingDirectory=/etc/warp-plus/
-ExecStart=/etc/warp-plus/warp-plus --scan${cfonval}${wrpky}
-ExecStop=/bin/kill -TERM \$MAINPID
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-abort
-
-[Install]
-WantedBy=multi-user.target
-EOF
-######
-rm -rf ~/.cache/warp-plus
-service_enable "warp-plus"; 
-msg "\nEnter after 10 seconds:\ncurl --socks5-hostname 127.0.0.1:8086 https://ipapi.co/json/\n"
-msg_inf "warp-plus settings changed!"
-exit 1
 fi
 ##############################Random Fake Site############################################################
 if [[ ${RNDTMPL} == *"y"* ]]; then
@@ -436,65 +402,139 @@ if ! systemctl start nginx > /dev/null 2>&1 || ! nginx -t &>/dev/null || nginx -
 fi
 systemctl is-enabled x-ui || sudo systemctl enable x-ui
 x-ui start > /dev/null 2>&1
-############################################Warp Plus (MOD)#############################################
+############################################Psiphon Core Deployment#############################################
+# Remove legacy warp-plus
 systemctl stop warp-plus > /dev/null 2>&1
-rm -rf ~/.cache/warp-plus /etc/warp-plus/
-mkdir -p /etc/warp-plus/
-chmod 777 /etc/warp-plus/
-## Download Cloudflare Warp Mod (wireguard)
-warpPlusDL="https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus_linux"
+systemctl disable warp-plus > /dev/null 2>&1
+rm -rf ~/.cache/warp-plus /etc/warp-plus/ /etc/systemd/system/warp-plus.service
 
-case "$(uname -m | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
-	x86_64 | amd64) wppDL="${warpPlusDL}-amd64.zip" ;;
-	aarch64 | arm64) wppDL="${warpPlusDL}-arm64.zip" ;;
-	armv*) wppDL="${warpPlusDL}-arm7.zip" ;;
-	mips) wppDL="${warpPlusDL}-mips.zip" ;;
-	mips64) wppDL="${warpPlusDL}-mips64.zip" ;;
-	mips64le) wppDL="${warpPlusDL}-mips64le.zip" ;;
-	mipsle*) wppDL="${warpPlusDL}-mipsle.zip" ;;
-	riscv*) wppDL="${warpPlusDL}-riscv64.zip" ;;
-	*) wppDL="${warpPlusDL}-amd64.zip" ;;
-esac  
+# Setup Psiphon Directories
+PSIPHON_DIR="/etc/psiphon-core"
+BIN_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
+BIN_PATH="${PSIPHON_DIR}/psiphon-tunnel-core"
+CONFIG_DIR="${PSIPHON_DIR}/configs"
+DATA_DIR="/var/cache/psiphon"
+LOG_DIR="/var/log/psiphon"
 
-wget --quiet -P /etc/warp-plus/ "${wppDL}" || curl --output-dir /etc/warp-plus/ -LOs "${wppDL}" 
-find "/etc/warp-plus/" -name '*.zip' | xargs -I {} sh -c 'unzip -d "$0" "{}" && rm -f "{}"' "/etc/warp-plus/"
+mkdir -p "$PSIPHON_DIR" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+
+if [[ ! -f "$BIN_PATH" ]]; then
+    msg_inf "Downloading psiphon-tunnel-core..."
+    wget -qO "$BIN_PATH" "$BIN_URL"
+    chmod +x "$BIN_PATH"
+fi
+
+create_psiphon_config() {
+    local port="$1"
+    local country="$2"
+    local config_file="${CONFIG_DIR}/config-${port}.json"
+    local data_dir="${DATA_DIR}/instance-${port}"
+    mkdir -p "$data_dir"
+    cat > "$config_file" << EOF
+{
+    "LocalHttpProxyPort": 0,
+    "LocalSocksProxyPort": $port,
+    "EgressRegion": "$country",
+    "DataRootDirectory": "$data_dir",
+    "NetworkID": "X-UI-PRO-$port",
+    "PropagationChannelId": "FFFFFFFFFFFFFFFF",
+    "RemoteServerListDownloadFilename": "remote_server_list",
+    "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
+    "RemoteServerListUrl": "https://s3.amazonaws.com//psiphon/web/mjr4-p23r-puwl/server_list_compressed",
+    "SponsorId": "1",
+    "UseIndistinguishableTLS": true
+}
+EOF
+}
+
 MultiPsiphon="n"
 read -p $'\e[1;32;40m Do you want to deploy Multi-Port Psiphon instances? (y/n): \e[0m' MultiPsiphon
 
 if [[ "$MultiPsiphon" == "y" ]]; then
-    # Delegate to the specialized deployment script
-    msg_inf "Delegating to Psiphon Deployment Manager..."
-    
-    # Ensure script exists
-    if [[ ! -f "./deploy-psiphon.sh" ]]; then
-        msg_war "deploy-psiphon.sh not found. Downloading..."
-        wget -qO deploy-psiphon.sh https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/deploy-psiphon.sh
-        chmod +x deploy-psiphon.sh
-    fi
-    
-    # Run deployment
-    chmod +x ./deploy-psiphon.sh
-    ./deploy-psiphon.sh
-    
-else
-    # Legacy WARP+ Setup
-    msg_inf "Installing legacy WARP+..."
-    cat > /etc/systemd/system/warp-plus.service << EOF
+     PORTS=(8080 8081 8082 8083 8084)
+     declare -A INSTANCE_COUNTRIES
+     msg_inf "Please select a country for each instance (2-letter code, e.g., US, DE, GB)."
+     msg_inf "Available: AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US"
+     
+     for port in "${PORTS[@]}"; do
+         while true; do
+             read -p "Enter country for Port $port (default: US): " country
+             country=${country:-US}
+             country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+             if [[ "$country" =~ ^[A-Z]{2}$ ]]; then
+                 INSTANCE_COUNTRIES[$port]=$country
+                 break
+             else
+                 msg_err "Invalid country code."
+             fi
+         done
+     done
+
+     for port in "${PORTS[@]}"; do
+         country=${INSTANCE_COUNTRIES[$port]}
+         service_name="psiphon-${port}"
+         config_file="${CONFIG_DIR}/config-${port}.json"
+         log_file="${LOG_DIR}/${service_name}.log"
+         
+         create_psiphon_config "$port" "$country"
+         
+         cat > "/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
-Description=warp-plus service
-After=network.target nss-lookup.target
+Description=Psiphon Instance on Port $port ($country)
+After=network.target
 
 [Service]
-WorkingDirectory=/etc/warp-plus/
-ExecStart=/etc/warp-plus/warp-plus
-ExecStop=/bin/kill -TERM \$MAINPID
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-abort
+Type=simple
+User=root
+WorkingDirectory=$PSIPHON_DIR
+ExecStart=$BIN_PATH -config $config_file -formatNotices json
+Restart=always
+RestartSec=10
+LimitNOFILE=65535
+StandardOutput=append:$log_file
+StandardError=append:$log_file
 
 [Install]
 WantedBy=multi-user.target
 EOF
+         systemctl daemon-reload
+         systemctl enable "$service_name"
+         systemctl restart "$service_name"
+     done
+else
+    # Single default instance (replacing old warp-plus default)
+    port="8086"
+    country="US"
+    service_name="psiphon-${port}"
+    config_file="${CONFIG_DIR}/config-${port}.json"
+    log_file="${LOG_DIR}/${service_name}.log"
+    
+    create_psiphon_config "$port" "$country"
+    
+    cat > "/etc/systemd/system/${service_name}.service" <<EOF
+[Unit]
+Description=Psiphon Instance on Port $port ($country)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$PSIPHON_DIR
+ExecStart=$BIN_PATH -config $config_file -formatNotices json
+Restart=always
+RestartSec=10
+LimitNOFILE=65535
+StandardOutput=append:$log_file
+StandardError=append:$log_file
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable "$service_name"
+    systemctl restart "$service_name"
 fi
+
 
 ##########################################Install v2ray-core + v2rayA-webui#############################
 sudo sh -c "$(wget -qO- https://github.com/v2rayA/v2rayA-installer/raw/main/installer.sh)" @ --with-xray
@@ -509,10 +549,10 @@ tasks=(
 
 if [[ "$MultiPsiphon" == "y" ]]; then
     service_enable "v2raya"
-    # Note: Psiphon services are enabled/started by deploy-psiphon.sh
+    # Psiphon services are already started by the logic above
     
-    # Add monitoring cron jobs for 10 ports
-    PORTS=($(seq 8080 8089))
+    # Add monitoring cron jobs for 5 ports
+    PORTS=(8080 8081 8082 8083 8084)
     PORT_LIST=$(printf "psiphon-%s " "${PORTS[@]}")
     tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya $PORT_LIST tor'")
     
@@ -520,9 +560,9 @@ if [[ "$MultiPsiphon" == "y" ]]; then
         tasks+=("*/5 * * * * sudo su -c '[[ \"\$(curl -s --connect-timeout 5 --socks5-hostname 127.0.0.1:$port checkip.amazonaws.com)\" =~ ^[0-9.]+$ ]] || systemctl restart psiphon-$port'")
     done
 else
-    service_enable "v2raya" "warp-plus"
-    tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya warp-plus tor'")
-    tasks+=("* * * * * sudo su -c '[[ \"\$(curl -s --socks5-hostname 127.0.0.1:8086 checkip.amazonaws.com)\" =~ ^((([0-9]{1,3}\.){3}[0-9]{1,3})|(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}))\$ ]] || systemctl restart warp-plus'")
+    service_enable "v2raya" "psiphon-8086"
+    tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya psiphon-8086 tor'")
+    tasks+=("*/5 * * * * sudo su -c '[[ \"\$(curl -s --connect-timeout 5 --socks5-hostname 127.0.0.1:8086 checkip.amazonaws.com)\" =~ ^[0-9.]+$ ]] || systemctl restart psiphon-8086'")
 fi
 ######################cronjob for ssl/reload service/cloudflareips######################################
 crontab -l | grep -qE "x-ui" || { printf "%s\n" "${tasks[@]}" | crontab -; }

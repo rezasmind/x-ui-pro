@@ -1,121 +1,61 @@
 #!/bin/bash
+# check-psiphon.sh
+# Quickly check the status, IP, and Country of all Psiphon instances
 
-#############################################################################
-#  Psiphon Status Checker v2.0
-#  Part of X-UI-PRO - Multi-Country VPN Configuration System
-#  
-#  Quick health check for all Psiphon instances
-#############################################################################
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Colors
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[0;33m'
-readonly BLUE='\033[0;34m'
-readonly CYAN='\033[0;36m'
-readonly BOLD='\033[1m'
-readonly NC='\033[0m'
+CONFIG_DIR="/etc/psiphon-core/configs"
 
-readonly PORTS=(8080 8081 8082 8083 8084 8085 8086 8087 8088 8089)
+echo -e "${BLUE}=== Psiphon Instances Status ===${NC}"
+printf "%-8s %-12s %-10s %-16s %-10s\n" "Port" "Service" "Config" "Real IP" "Real Country"
+echo "------------------------------------------------------------------"
 
-echo ""
-echo -e "${CYAN}${BOLD}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║           Psiphon Multi-Instance Status Check                 ║${NC}"
-echo -e "${CYAN}${BOLD}║                  X-UI-PRO v2.0                                 ║${NC}"
-echo -e "${CYAN}${BOLD}╚═══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "${BLUE}Checking at:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
-echo ""
-
-printf "${CYAN}╔══════════╦════════════╦════════════╦══════════════════╦══════════╗${NC}\n"
-printf "${CYAN}║${NC} ${BOLD}%-8s${NC} ${CYAN}║${NC} ${BOLD}%-10s${NC} ${CYAN}║${NC} ${BOLD}%-10s${NC} ${CYAN}║${NC} ${BOLD}%-16s${NC} ${CYAN}║${NC} ${BOLD}%-8s${NC} ${CYAN}║${NC}\n" \
-       "Port" "Service" "Config" "Real IP" "Country"
-printf "${CYAN}╠══════════╬════════════╬════════════╬══════════════════╬══════════╣${NC}\n"
-
-online_count=0
-configured_count=0
-
-# First, find which ports have services configured
-ACTIVE_PORTS=()
-for config in /etc/psiphon-core/configs/config-*.json; do
-    if [[ -f "$config" ]]; then
-        port=$(jq -r .LocalSocksProxyPort "$config" 2>/dev/null)
-        if [[ -n "$port" ]]; then
-            ACTIVE_PORTS+=($port)
-            ((configured_count++)) || true
-        fi
-    fi
-done
-
-if [[ ${#ACTIVE_PORTS[@]} -eq 0 ]]; then
-    echo -e "${RED}No Psiphon services found. Run ./deploy-psiphon.sh to configure.${NC}"
-    exit 1
-fi
-
-total_count=${#ACTIVE_PORTS[@]}
-
-for port in "${ACTIVE_PORTS[@]}"; do
+for port in {8080..8084}; do
     service="psiphon-${port}"
-    status_color="$RED"
-    svc_status="STOPPED"
-    cfg_country="-"
-    ip="-"
-    real_country="-"
+    config_file="${CONFIG_DIR}/config-${port}.json"
     
-    # Get configured country from service file
-    if [[ -f "/etc/systemd/system/${service}.service" ]]; then
-        cfg_country=$(grep -oP '(?<=--country )\w+' "/etc/systemd/system/${service}.service" 2>/dev/null || echo "-")
-    fi
-    
-    # Check service status
-    if systemctl is-active --quiet "$service" 2>/dev/null; then
-        svc_status="ACTIVE"
-        status_color="$YELLOW"
+    # 1. Get Service Status
+    if systemctl is-active --quiet "$service"; then
+        svc_status="${GREEN}Active${NC}"
         
-        # Check actual connectivity
-        ip_info=$(curl --connect-timeout 5 --max-time 10 \
-                  --socks5-hostname "127.0.0.1:$port" \
-                  -s "https://ipapi.co/json" 2>/dev/null || echo "")
-        
-        if [[ -n "$ip_info" && "$ip_info" != *"error"* ]]; then
-            svc_status="ONLINE"
-            status_color="$GREEN"
-            ((online_count++))
-            
+        # 2. Get Configured Country from Config File
+        if [[ -f "$config_file" ]]; then
             if command -v jq &> /dev/null; then
-                ip=$(echo "$ip_info" | jq -r '.ip // "-"')
-                real_country=$(echo "$ip_info" | jq -r '.country_code // "-"')
+                cfg_country=$(jq -r .EgressRegion "$config_file")
+            else
+                cfg_country=$(grep -o '"EgressRegion": *"[^"]*"' "$config_file" | cut -d'"' -f4)
+            fi
+        else
+            cfg_country="?"
+        fi
+        
+        # 3. Check Actual Connectivity
+        # 2s timeout to be quick
+        ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$port -s https://ipapi.co/json 2>/dev/null)
+        
+        if [[ -n "$ip_info" ]]; then
+            if command -v jq &> /dev/null; then
+                ip=$(echo "$ip_info" | jq -r .ip)
+                real_country=$(echo "$ip_info" | jq -r .country_code)
             else
                 ip=$(echo "$ip_info" | grep -o '"ip": *"[^"]*"' | cut -d'"' -f4)
                 real_country=$(echo "$ip_info" | grep -o '"country_code": *"[^"]*"' | cut -d'"' -f4)
             fi
-            
-            # Truncate long IPs
-            [[ ${#ip} -gt 16 ]] && ip="${ip:0:13}..."
+        else
+            ip="${RED}Unreachable${NC}"
+            real_country="-"
         fi
+    else
+        svc_status="${RED}Inactive${NC}"
+        cfg_country="-"
+        ip="-"
+        real_country="-"
     fi
     
-    printf "${CYAN}║${NC} %-8s ${CYAN}║${NC} ${status_color}%-10s${NC} ${CYAN}║${NC} %-10s ${CYAN}║${NC} %-16s ${CYAN}║${NC} %-8s ${CYAN}║${NC}\n" \
-           "$port" "$svc_status" "${cfg_country:-?}" "$ip" "$real_country"
+    printf "%-8s %-20s %-10s %-16s %-10s\n" "$port" "$svc_status" "${cfg_country:-?}" "$ip" "$real_country"
 done
 
-printf "${CYAN}╚══════════╩════════════╩════════════╩══════════════════╩══════════╝${NC}\n"
-
-echo ""
-
-# Summary
-if [[ $online_count -eq $total_count ]]; then
-    echo -e "${GREEN}${BOLD}✓ All $total_count instances are ONLINE${NC}"
-elif [[ $online_count -gt 0 ]]; then
-    echo -e "${YELLOW}${BOLD}⚠ $online_count/$total_count instances are ONLINE${NC}"
-else
-    echo -e "${RED}${BOLD}✗ No instances are online${NC}"
-    echo -e "${YELLOW}TIP: Instances may still be initializing. Check again in 1-2 minutes.${NC}"
-fi
-
-echo ""
-echo -e "${BLUE}Commands:${NC}"
-echo -e "  • Full management: ${BOLD}./deploy-psiphon.sh${NC}"
-echo -e "  • Live monitoring: ${BOLD}./deploy-psiphon.sh monitor${NC}"
-echo -e "  • View logs:       ${BOLD}./deploy-psiphon.sh logs 8080${NC}"
 echo ""
