@@ -74,11 +74,11 @@ clean_old_instances() {
         if command -v lsof &> /dev/null; then
             lsof -ti :$port | xargs kill -9 2>/dev/null || true
         fi
-        # Kill via netstat/ss
-        if command -v ss &> /dev/null; then
-             pid=$(ss -lptn "sport = :$port" | grep -oP 'pid=\K\d+')
-             if [[ -n "$pid" ]]; then kill -9 $pid 2>/dev/null || true; fi
-        fi
+         # Kill via netstat/ss
+         if command -v ss &> /dev/null; then
+              pid=$(ss -lptn "sport = :$port" | grep -oP 'pid=\K\d+' || true)
+              if [[ -n "$pid" ]]; then kill -9 $pid 2>/dev/null || true; fi
+         fi
     done
 }
 
