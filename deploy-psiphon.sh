@@ -8,7 +8,7 @@
 #  Each instance connects through a different country for multi-geo configs
 #############################################################################
 
-set -euo pipefail
+set -eo pipefail
 
 # Colors and Styling
 readonly RED='\033[0;31m'
@@ -62,8 +62,9 @@ check_root() {
 }
 
 validate_country() {
-    local country="$1"
-    if echo "$VALID_COUNTRIES" | grep -qw "$country"; then
+    local country="${1:-}"
+    [[ -z "$country" ]] && return 1
+    if echo " $VALID_COUNTRIES " | grep -q " $country "; then
         return 0
     else
         return 1
@@ -183,7 +184,7 @@ configure_instances() {
                 log_warn "Invalid country code '$country'. Please use a valid 2-letter code."
             fi
         done
-        ((idx++))
+        idx=$((idx + 1))
     done
 
     echo ""
