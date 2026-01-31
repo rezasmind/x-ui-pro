@@ -1,7 +1,7 @@
 #!/bin/bash
-# deploy-docker-psiphon.sh
-# Alternative Psiphon Deployment using Docker
-# Deploys 5 concurrent instances on ports 8080-8084 using 'thepsiphonguys/psiphon' image
+# deploy-docker-psiphon-fixed.sh
+# Fixes "port already allocated" error by strictly cleaning specific ports
+# Deploys 5 concurrent instances on ports 8080-8084
 
 set -e
 
@@ -29,118 +29,72 @@ check_root() {
     fi
 }
 
-install_docker() {
+install_dependencies() {
+    log_info "Checking system dependencies..."
+    local pkgs=""
+    
     if ! command -v docker &> /dev/null; then
-        log_info "Docker not found. Installing..."
+        log_info "Installing Docker..."
         curl -fsSL https://get.docker.com -o get-docker.sh
         sh get-docker.sh
         rm get-docker.sh
         systemctl enable docker
         systemctl start docker
-        log_success "Docker installed."
-    else
-        log_info "Docker is already installed."
     fi
+
+    # Check for utilities used in cleanup and monitoring
+    if ! command -v jq &> /dev/null; then pkgs="$pkgs jq"; fi
+    if ! command -v fuser &> /dev/null; then pkgs="$pkgs psmisc"; fi
+    if ! command -v lsof &> /dev/null; then pkgs="$pkgs lsof"; fi
+    if ! command -v netstat &> /dev/null; then pkgs="$pkgs net-tools"; fi
+
+    if [[ -n "$pkgs" ]]; then
+        log_info "Installing missing packages:$pkgs..."
+        apt-get update -qq && apt-get install -y $pkgs -qq
+    fi
+    log_success "Dependencies installed."
 }
 
 clean_old_instances() {
-    log_info "Cleaning up old containers and processes..."
+    log_info "Cleaning up..."
     
-    # Stop native services if running
     for port in "${PORTS[@]}"; do
+        # 1. Stop Native Services
         systemctl stop "psiphon-${port}" 2>/dev/null || true
-        systemctl disable "psiphon-${port}" 2>/dev/null || true
-    done
-    
-    # Stop docker containers more aggressively
-    log_info "Stopping and removing Docker containers with prefix $CONTAINER_PREFIX..."
-    containers=$(docker ps -a --filter "name=${CONTAINER_PREFIX}" --format '{{.Names}}' 2>/dev/null || true)
-    if [[ -n "$containers" ]]; then
-        echo "$containers" | while read container_name; do
-            log_info "Removing container $container_name..."
-            docker rm -f "$container_name" 2>/dev/null || true
-        done
-    fi
-    
-    # Clean up Docker networks to release port bindings
-    log_info "Cleaning up Docker networks..."
-    docker network prune -f 2>/dev/null || true
-    
-    # Wait for ports to be released
-    sleep 2
-    
-    # Kill any lingering processes on ports (Aggressive Cleanup)
-    log_info "Force-killing processes on ports ${PORTS[*]}..."
-    if command -v fuser &> /dev/null; then
-        for port in "${PORTS[@]}"; do
-            fuser -k "${port}/tcp" 2>/dev/null || true
-        done
-    fi
-    # Also use ss/lsof logic if fuser fails or is missing
-    for port in "${PORTS[@]}"; do
-        # Kill via lsof if available
-        if command -v lsof &> /dev/null; then
-            lsof -ti :$port | xargs kill -9 2>/dev/null || true
-        fi
-         # Kill via netstat/ss
-         if command -v ss &> /dev/null; then
-              pid=$(ss -lptn "sport = :$port" | grep -oP 'pid=\K\d+' || true)
-              if [[ -n "$pid" ]]; then kill -9 $pid 2>/dev/null || true; fi
-         fi
-     done
-}
-
-verify_ports_free() {
-    log_info "Verifying ports are free..."
-    local all_free=true
-    
-    for port in "${PORTS[@]}"; do
-        # Check if port is in use
-        if ss -lnt "sport = :$port" | grep -q ":$port"; then
-            log_warn "Port $port is still in use!"
-            all_free=false
-            
-            # Try to find and kill what's using it
-            log_info "Attempting to free port $port..."
-            
-            # Kill via fuser
-            fuser -k "${port}/tcp" 2>/dev/null || true
-            
-            # Kill via lsof
-            if command -v lsof &> /dev/null; then
-                pids=$(lsof -ti :$port 2>/dev/null || true)
-                if [[ -n "$pids" ]]; then
-                    echo "$pids" | xargs -r kill -9 2>/dev/null || true
-                fi
-            fi
-            
-            # Kill via ss
-            pid=$(ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1 || true)
-            if [[ -n "$pid" ]]; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-            
-            # Wait a moment
-            sleep 1
-        fi
-    done
-    
-    if [[ "$all_free" == "false" ]]; then
-        log_warn "Some ports were in use. Retrying cleanup..."
-        sleep 2
         
-        # Final check
-        for port in "${PORTS[@]}"; do
-            if ss -lnt "sport = :$port" | grep -q ":$port"; then
-                log_error "Port $port is STILL in use after cleanup!"
-                log_info "Processes on port $port:"
-                ss -lptn "sport = :$port" 2>/dev/null || true
-                lsof -i :$port 2>/dev/null || true
-            fi
-        done
-    else
-        log_success "All ports are free."
-    fi
+        # 2. Stop ANY Docker container using this port (regardless of name)
+        # We look for containers publishing the specific port
+        local conflicting_container=$(docker ps -a --format '{{.ID}}' --filter "publish=$port")
+        
+        if [[ -n "$conflicting_container" ]]; then
+            log_warn "Found container ($conflicting_container) holding port $port. Removing..."
+            docker rm -f $conflicting_container >/dev/null
+        fi
+
+        # 3. Double check specifically for our named containers (just in case network wasn't bound yet)
+        local named_container="${CONTAINER_PREFIX}-${port}"
+        if docker ps -a --format '{{.Names}}' | grep -q "^${named_container}$"; then
+            log_info "Removing named container $named_container..."
+            docker rm -f "$named_container" >/dev/null
+        fi
+    done
+    
+    # Prune networks
+    docker network prune -f >/dev/null 2>&1 || true
+    
+    # 4. Aggressive Process Kill (Native processes)
+    # If Docker didn't hold the port, maybe Apache/Nginx/Python is holding it
+    log_info "Ensuring ports are fully released on host..."
+    for port in "${PORTS[@]}"; do
+        if command -v fuser &> /dev/null; then
+            fuser -k -9 "${port}/tcp" 2>/dev/null || true
+        fi
+        if command -v lsof &> /dev/null; then
+            lsof -ti :$port | xargs -r kill -9 2>/dev/null || true
+        fi
+    done
+    
+    sleep 2
 }
 
 deploy_containers() {
@@ -148,119 +102,101 @@ deploy_containers() {
     
     declare -A INSTANCE_COUNTRIES
     
-    echo "Please select a country for each instance (2-letter code, e.g., US, DE, GB)."
-    echo "Available: AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US"
-    echo ""
+    echo "-------------------------------------------------------"
+    echo "Configuration (Press Enter to use default: US)"
+    echo "-------------------------------------------------------"
 
     for port in "${PORTS[@]}"; do
-        while true; do
-            read -p "Enter country for Port $port (default: US): " country
-            country=${country:-US}
-            country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
-            
-            if [[ "$country" =~ ^[A-Z]{2}$ ]]; then
-                INSTANCE_COUNTRIES[$port]=$country
-                break
-            else
-                log_warn "Invalid country code. Please use 2 letters."
-            fi
-        done
+        read -p "Enter country for Port $port [US]: " country
+        country=${country:-US}
+        country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+        INSTANCE_COUNTRIES[$port]=$country
     done
 
-    # Pull image once
-    log_info "Pulling Docker image: $DOCKER_IMAGE..."
-    docker pull "$DOCKER_IMAGE"
+    # Pull image
+    log_info "Ensuring Docker image is up to date..."
+    docker pull "$DOCKER_IMAGE" >/dev/null
 
     for port in "${PORTS[@]}"; do
         country=${INSTANCE_COUNTRIES[$port]}
         container_name="${CONTAINER_PREFIX}-${port}"
         
+        # Check one last time if port is free
+        if netstat -tuln | grep -q ":$port "; then
+            log_error "Port $port is still occupied! Skipping..."
+            continue
+        fi
+
         log_info "Starting $container_name (Port: $port, Country: $country)..."
         
-        # We map host port $port to container port 1080 (default internal SOCKS port)
-        # We must invoke python explicitly as the image likely has no entrypoint for flags
+        # Run Container
         docker run -d \
             --name "$container_name" \
             --restart always \
             -p "${port}:1080" \
             "$DOCKER_IMAGE" \
-            python psi_client.py -r "$country" -e
+            python psi_client.py -r "$country" -e >/dev/null
             
         if [ $? -eq 0 ]; then
-            log_success "Container $container_name started."
+            log_success "Started $container_name on :$port"
         else
-            log_error "Failed to start $container_name."
-        fi
-    done
-}
-
-verify_deployment() {
-    log_info "Verifying deployment (waiting 15s for initialization)..."
-    sleep 15
-    
-    for port in "${PORTS[@]}"; do
-        log_info "Checking port $port..."
-        
-        container_name="${CONTAINER_PREFIX}-${port}"
-        if ! docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
-             log_error "Container $container_name is NOT running."
-             continue
-        fi
-
-        # Test connectivity
-        local ip_info=$(curl --connect-timeout 5 --socks5 127.0.0.1:$port -s https://ipapi.co/json || echo "failed")
-        
-        if [[ "$ip_info" == "failed" ]]; then
-            log_error "Port $port: Connection failed."
-            # Check container logs
-            echo "--- Container Logs ($container_name) ---"
-            docker logs --tail 5 "$container_name"
-            echo "----------------------------------------"
-        else
-            local ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "Unknown")
-            local country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "Unknown")
-            log_success "Port $port: Online | IP: $ip | Country: $country"
+            log_error "Failed to start $container_name"
         fi
     done
 }
 
 monitor_mode() {
+    # Check for jq
+    if ! command -v jq &> /dev/null; then
+        echo "Error: jq is required for monitoring. Run install first."
+        exit 1
+    fi
+
     while true; do
         clear
         echo "=== Psiphon Docker Monitor ==="
         date
-        echo ""
-        printf "%-10s %-20s %-10s %-15s %-10s\n" "Port" "Container" "Status" "IP" "Country"
-        echo "----------------------------------------------------------------------"
+        echo "--------------------------------------------------------------------------------"
+        printf "%-8s %-25s %-10s %-18s %-5s\n" "Port" "Container Name" "Status" "Public IP" "Loc"
+        echo "--------------------------------------------------------------------------------"
         
         for port in "${PORTS[@]}"; do
             container_name="${CONTAINER_PREFIX}-${port}"
             status="DOWN"
+            ip="-"
+            loc="-"
             
+            # Check Docker Status
             if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
                 status="UP"
             fi
             
+            # Check Connectivity if UP
             if [[ "$status" == "UP" ]]; then
-                ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$port -s https://ipapi.co/json 2>/dev/null)
-                if [[ -z "$ip_info" ]]; then
-                     ip="Unreachable"
-                     country="-"
+                # Timeout set to 3 seconds to prevent UI lag
+                ip_json=$(curl --connect-timeout 3 --socks5 127.0.0.1:$port -s https://ipapi.co/json || echo "")
+                
+                if [[ -n "$ip_json" ]]; then
+                    ip=$(echo "$ip_json" | jq -r .ip 2>/dev/null || echo "Err")
+                    loc=$(echo "$ip_json" | jq -r .country_code 2>/dev/null || echo "?")
                 else
-                     ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "-")
-                     country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "-")
+                    ip="Connecting..."
                 fi
-            else
-                ip="-"
-                country="-"
             fi
             
-            printf "%-10s %-20s %-10s %-15s %-10s\n" "$port" "$container_name" "$status" "$ip" "$country"
+            # Colorize Status
+            if [[ "$status" == "UP" ]]; then
+                status_disp="${GREEN}${status}${NC}"
+            else
+                status_disp="${RED}${status}${NC}"
+            fi
+
+            printf "%-8s %-25s %-19s %-18s %-5s\n" "$port" "$container_name" "$status_disp" "$ip" "$loc"
         done
         
         echo ""
-        echo "Press Ctrl+C to exit monitor."
-        sleep 10
+        echo "Press Ctrl+C to exit."
+        sleep 5
     done
 }
 
@@ -272,14 +208,13 @@ main() {
         exit 0
     fi
 
-    install_docker
+    install_dependencies
     clean_old_instances
-    verify_ports_free
     deploy_containers
-    verify_deployment
     
-    log_success "Docker deployment complete."
-    log_info "Run '$0 monitor' to view status."
+    echo ""
+    log_success "Deployment finished."
+    log_info "Run: './deploy-docker-psiphon-fixed.sh monitor' to see status."
 }
 
 main "$@"
