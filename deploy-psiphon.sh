@@ -122,6 +122,8 @@ configure_instances() {
     for port in "${PORTS[@]}"; do
         systemctl stop "psiphon-${port}" 2>/dev/null || true
         systemctl disable "psiphon-${port}" 2>/dev/null || true
+        # Kill any process using the port to prevent "SocksProxyPortInUse" error
+        fuser -k "${port}/tcp" 2>/dev/null || true
     done
 
     # Generate Systemd Services
