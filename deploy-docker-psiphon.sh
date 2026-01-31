@@ -61,12 +61,25 @@ clean_old_instances() {
         fi
     done
     
-    # Kill any lingering processes on ports
+    # Kill any lingering processes on ports (Aggressive Cleanup)
+    log_info "Force-killing processes on ports ${PORTS[*]}..."
     if command -v fuser &> /dev/null; then
         for port in "${PORTS[@]}"; do
             fuser -k "${port}/tcp" 2>/dev/null || true
         done
     fi
+    # Also use ss/lsof logic if fuser fails or is missing
+    for port in "${PORTS[@]}"; do
+        # Kill via lsof if available
+        if command -v lsof &> /dev/null; then
+            lsof -ti :$port | xargs kill -9 2>/dev/null || true
+        fi
+        # Kill via netstat/ss
+        if command -v ss &> /dev/null; then
+             pid=$(ss -lptn "sport = :$port" | grep -oP 'pid=\K\d+')
+             if [[ -n "$pid" ]]; then kill -9 $pid 2>/dev/null || true; fi
+        fi
+    done
 }
 
 deploy_containers() {
