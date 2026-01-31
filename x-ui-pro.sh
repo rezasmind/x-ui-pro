@@ -481,25 +481,49 @@ if [[ "$MultiPsiphon" == "y" ]]; then
         done
     done
 
+    mkdir -p /var/log/psiphon
     for port in "${PORTS[@]}"; do
         country=${INSTANCE_COUNTRIES[$port]}
         service_name="psiphon-${port}"
         cache_dir="/var/cache/psiphon-${port}"
+        log_file="/var/log/psiphon/${service_name}.log"
         mkdir -p "$cache_dir"
         
         cat > "/etc/systemd/system/${service_name}.service" <<EOF
 [Unit]
-Description=Psiphon Instance on Port $port ($country)
-After=network.target
+Description=Psiphon Instance on Port $port ($country) - X-UI-PRO
+Documentation=https://github.com/rezasmind/x-ui-pro
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/warp-plus/
-ExecStart=/etc/warp-plus/warp-plus --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
+Environment="HOME=/root"
+
+# Pre-start: Clean old cache for fresh connection
+ExecStartPre=/bin/bash -c 'rm -rf $cache_dir/* 2>/dev/null || true'
+
+# Main execution with --scan for better endpoint discovery
+ExecStart=/etc/warp-plus/warp-plus --scan --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
+
+# Graceful shutdown
+ExecStop=/bin/kill -TERM \$MAINPID
+
+# Restart on failure with backoff
 Restart=always
-RestartSec=5
+RestartSec=15
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Resource limits
 LimitNOFILE=65535
+LimitNPROC=65535
+
+# Logging
+StandardOutput=append:$log_file
+StandardError=append:$log_file
 
 [Install]
 WantedBy=multi-user.target
@@ -532,7 +556,18 @@ tasks=(
 )
 
 if [[ "$MultiPsiphon" == "y" ]]; then
-    service_enable "v2raya" "psiphon-8080" "psiphon-8081" "psiphon-8082" "psiphon-8083" "psiphon-8084"
+    msg_inf "Starting Psiphon instances (this may take 30-60 seconds)..."
+    systemctl daemon-reload
+    # Start services with delay between each to prevent resource conflicts
+    for p in 8080 8081 8082 8083 8084; do
+        msg " Starting psiphon-${p}..."
+        systemctl enable "psiphon-${p}" > /dev/null 2>&1
+        systemctl start "psiphon-${p}" > /dev/null 2>&1
+        sleep 3
+    done
+    service_enable "v2raya"
+    msg_ok "Psiphon instances started. Waiting for initialization..."
+    sleep 15
     tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya psiphon-8080 psiphon-8081 psiphon-8082 psiphon-8083 psiphon-8084 tor'")
     for p in 8080 8081 8082 8083 8084; do
         tasks+=("* * * * * sudo su -c '[[ \"\$(curl -s --socks5-hostname 127.0.0.1:$p checkip.amazonaws.com)\" =~ ^((([0-9]{1,3}\.){3}[0-9]{1,3})|(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}))\$ ]] || systemctl restart psiphon-$p'")
@@ -574,18 +609,32 @@ if systemctl is-active --quiet x-ui || command -v x-ui &> /dev/null; then clear
 	msg "Username: $XUIUSER\n Password: $XUIPASS"
 	if [[ "$MultiPsiphon" == "y" ]]; then
         hrline
-        msg_inf "Psiphon Instances Status:"
-        printf "%-10s %-15s %-10s\n" "Port" "IP" "Country"
+        msg_inf "Psiphon Instances Status (may take 30-60s to fully initialize):"
+        msg ""
+        printf "╔══════════╦════════════╦══════════════════╦══════════╗\n"
+        printf "║ %-8s ║ %-10s ║ %-16s ║ %-8s ║\n" "Port" "Status" "IP" "Country"
+        printf "╠══════════╬════════════╬══════════════════╬══════════╣\n"
         for p in 8080 8081 8082 8083 8084; do
-             ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$p -s https://ipapi.co/json 2>/dev/null)
-             if [[ -n "$ip_info" ]]; then
-                 ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "$ip_info" | grep -o '"ip": *"[^"]*"' | cut -d'"' -f4)
-                 country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "$ip_info" | grep -o '"country_code": *"[^"]*"' | cut -d'"' -f4)
-                 printf "%-10s %-15s %-10s\n" "$p" "$ip" "$country"
+             status="INIT..."
+             ip="-"
+             country="-"
+             if systemctl is-active --quiet "psiphon-${p}" 2>/dev/null; then
+                 status="ACTIVE"
+                 ip_info=$(curl --connect-timeout 5 --max-time 10 --socks5-hostname 127.0.0.1:$p -s https://ipapi.co/json 2>/dev/null)
+                 if [[ -n "$ip_info" && "$ip_info" != *"error"* ]]; then
+                     status="ONLINE"
+                     ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "$ip_info" | grep -o '"ip": *"[^"]*"' | cut -d'"' -f4)
+                     country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "$ip_info" | grep -o '"country_code": *"[^"]*"' | cut -d'"' -f4)
+                     [[ ${#ip} -gt 16 ]] && ip="${ip:0:13}..."
+                 fi
              else
-                 printf "%-10s %-15s %-10s\n" "$p" "DOWN" "-"
+                 status="STOPPED"
              fi
+             printf "║ %-8s ║ %-10s ║ %-16s ║ %-8s ║\n" "$p" "$status" "$ip" "$country"
         done
+        printf "╚══════════╩════════════╩══════════════════╩══════════╝\n"
+        msg ""
+        msg_war "TIP: Run './check-psiphon.sh' or './deploy-psiphon.sh status' to check again"
     fi
 	hrline
 	msg_war "Note: Save This Screen!"	
