@@ -1,8 +1,8 @@
 #!/bin/bash
 # deploy-psiphon.sh
-# Psiphon Multi-Instance Deployment Tool (Using official psiphon-tunnel-core)
-# Based on SpherionOS/PsiphonLinux
-# Deploys 5 concurrent Psiphon instances on ports 8080-8084
+# Psiphon Multi-Instance Deployment Tool
+# Implements requirements from PRD.md
+# Deploys 5 concurrent Psiphon instances on specific ports/countries
 
 set -e
 
@@ -14,13 +14,19 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-PORTS=(8080 8081 8082 8083 8084)
-PSIPHON_DIR="/etc/psiphon-core"
+BASE_DIR="/opt/psiphon"
 BIN_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
-BIN_PATH="${PSIPHON_DIR}/psiphon-tunnel-core"
-CONFIG_DIR="${PSIPHON_DIR}/configs"
-DATA_DIR="/var/cache/psiphon"
-LOG_DIR="/var/log/psiphon"
+USER="psiphon"
+
+# Instance Definitions
+# Format: "NAME|COUNTRY|HTTP_PORT|SOCKS_PORT"
+INSTANCES=(
+    "psiphon-us|US|8081|1081"
+    "psiphon-gb|GB|8082|1082"
+    "psiphon-fr|FR|8083|1083"
+    "psiphon-sg|SG|8084|1084"
+    "psiphon-nl|NL|8085|1085"
+)
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
@@ -51,10 +57,6 @@ install_dependencies() {
             install_list+=("iproute")
         fi
     fi
-
-    if ! command -v fuser &> /dev/null; then
-        install_list+=("psmisc")
-    fi
     
     if [[ ${#install_list[@]} -gt 0 ]]; then
         log_info "Installing dependencies: ${install_list[*]}"
@@ -66,66 +68,46 @@ install_dependencies() {
     fi
 }
 
-free_port() {
-    local port="$1"
-
-    systemctl stop "psiphon-${port}" 2>/dev/null || true
-    systemctl kill --kill-who=main --signal=KILL "psiphon-${port}" 2>/dev/null || true
-
-    if command -v fuser &> /dev/null; then
-        fuser -k "${port}/tcp" 2>/dev/null || true
-    fi
-
-    if command -v ss &> /dev/null; then
-        local pids
-        pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u | tr '\n' ' ')
-        for pid in $pids; do
-            kill -9 "$pid" 2>/dev/null || true
-        done
-
-        local waited=0
-        while ss -ltn "sport = :${port}" 2>/dev/null | grep -q ":${port}"; do
-            sleep 1
-            waited=$((waited + 1))
-            if [[ $waited -ge 30 ]]; then
-                return 1
-            fi
-        done
-    fi
-
-    return 0
-}
-
-install_psiphon_core() {
-    mkdir -p "$PSIPHON_DIR" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
-    
-    if [[ ! -f "$BIN_PATH" ]]; then
-        log_info "Downloading psiphon-tunnel-core..."
-        wget -qO "$BIN_PATH" "$BIN_URL"
-        chmod +x "$BIN_PATH"
-        log_success "Psiphon Core installed."
+setup_user() {
+    if ! id "$USER" &>/dev/null; then
+        log_info "Creating user $USER..."
+        useradd -r -s /bin/false "$USER"
     else
-        log_info "Psiphon Core already installed."
+        log_info "User $USER already exists."
     fi
 }
 
-# Generate Config File (Based on SpherionOS/PsiphonLinux template)
-create_config() {
-    local port="$1"
-    local country="$2"
-    local config_file="${CONFIG_DIR}/config-${port}.json"
-    local data_dir="${DATA_DIR}/instance-${port}"
+setup_instances() {
+    log_info "Setting up instances..."
     
-    mkdir -p "$data_dir"
-    
-    # Standard Psiphon Config JSON
-    cat > "$config_file" << EOF
+    # Download binary once
+    local temp_bin="/tmp/psiphon-tunnel-core"
+    log_info "Downloading Psiphon Core binary..."
+    wget -qO "$temp_bin" "$BIN_URL"
+    chmod +x "$temp_bin"
+
+    for instance in "${INSTANCES[@]}"; do
+        IFS='|' read -r name country http_port socks_port <<< "$instance"
+        
+        local instance_dir="${BASE_DIR}/${name}"
+        local config_file="${instance_dir}/client.json"
+        local bin_path="${instance_dir}/psiphon-client"
+        
+        log_info "Configuring $name (Region: $country, HTTP: $http_port, SOCKS: $socks_port)..."
+        
+        mkdir -p "$instance_dir"
+        
+        # Copy binary
+        cp "$temp_bin" "$bin_path"
+        chmod +x "$bin_path"
+        
+        # Create config
+        cat > "$config_file" << EOF
 {
-    "LocalHttpProxyPort": 0,
-    "LocalSocksProxyPort": $port,
+    "LocalHttpProxyPort": $http_port,
+    "LocalSocksProxyPort": $socks_port,
     "EgressRegion": "$country",
-    "DataRootDirectory": "$data_dir",
-    "NetworkID": "X-UI-PRO-$port",
+    "NetworkID": "X-UI-PRO-$name",
     "PropagationChannelId": "FFFFFFFFFFFFFFFF",
     "RemoteServerListDownloadFilename": "remote_server_list",
     "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
@@ -137,74 +119,44 @@ create_config() {
     "ConnectionWorkerPoolSize": 4
 }
 EOF
+        # Set permissions
+        chown -R "$USER:$USER" "$instance_dir"
+    done
+    
+    rm -f "$temp_bin"
 }
 
-configure_instances() {
-    log_info "Configuring Psiphon instances..."
+setup_systemd() {
+    log_info "Creating systemd template..."
     
-    declare -A INSTANCE_COUNTRIES
-    
-    echo "Please select a country for each instance (2-letter code, e.g., US, DE, GB)."
-    echo "Available: AT AU BE BG CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK US"
-    echo ""
-
-    for port in "${PORTS[@]}"; do
-        while true; do
-            read -p "Enter country for Port $port (default: US): " country
-            country=${country:-US}
-            country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
-            
-            if [[ "$country" =~ ^[A-Z]{2}$ ]]; then
-                INSTANCE_COUNTRIES[$port]=$country
-                break
-            else
-                log_warn "Invalid country code. Please use 2 letters."
-            fi
-        done
-    done
-
-    # Remove old warp-plus services if they exist
-    for port in "${PORTS[@]}"; do
-        systemctl stop "psiphon-${port}" 2>/dev/null || true
-        systemctl disable "psiphon-${port}" 2>/dev/null || true
-        free_port "$port" || true
-    done
-
-    # Generate Systemd Services
-    for port in "${PORTS[@]}"; do
-        country=${INSTANCE_COUNTRIES[$port]}
-        service_name="psiphon-${port}"
-        config_file="${CONFIG_DIR}/config-${port}.json"
-        log_file="${LOG_DIR}/${service_name}.log"
-        
-        create_config "$port" "$country"
-        
-        log_info "Creating service $service_name for Country: $country on Port: $port"
-        
-        cat > "/etc/systemd/system/${service_name}.service" <<EOF
+    cat > "/etc/systemd/system/psiphon@.service" <<EOF
 [Unit]
-Description=Psiphon Instance on Port $port ($country)
+Description=Psiphon Instance %i
 After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=$PSIPHON_DIR
-ExecStartPre=/bin/bash -c 'port=$port; if command -v fuser >/dev/null 2>&1; then fuser -k "${port}/tcp" 2>/dev/null || true; fi; if command -v ss >/dev/null 2>&1; then pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n "s/.*pid=\\([0-9]\\+\\).*/\\1/p" | sort -u); for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done; waited=0; while ss -ltn "sport = :${port}" 2>/dev/null | grep -q ":${port}"; do sleep 1; waited=$((waited+1)); if [ "$waited" -ge 30 ]; then exit 1; fi; done; fi; exit 0'
-ExecStart=$BIN_PATH -config $config_file -formatNotices json
+User=$USER
+WorkingDirectory=$BASE_DIR/%i
+ExecStart=$BASE_DIR/%i/psiphon-client -config client.json -formatNotices json
 Restart=always
-RestartSec=10
+RestartSec=5
 LimitNOFILE=65535
-StandardOutput=append:$log_file
-StandardError=append:$log_file
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-        systemctl daemon-reload
-        systemctl enable "$service_name"
-        systemctl restart "$service_name"
+    systemctl daemon-reload
+}
+
+start_instances() {
+    log_info "Starting instances..."
+    for instance in "${INSTANCES[@]}"; do
+        IFS='|' read -r name country http_port socks_port <<< "$instance"
+        
+        log_info "Enabling and starting psiphon@$name"
+        systemctl enable --now "psiphon@$name"
     done
 }
 
@@ -212,23 +164,30 @@ verify_deployment() {
     log_info "Verifying deployment (waiting 15s for services to initialize)..."
     sleep 15
     
-    for port in "${PORTS[@]}"; do
-        log_info "Checking instance on port $port..."
+    for instance in "${INSTANCES[@]}"; do
+        IFS='|' read -r name country http_port socks_port <<< "$instance"
         
-        if ! systemctl is-active --quiet "psiphon-${port}"; then
-            log_error "Service psiphon-${port} is NOT active."
+        log_info "Checking $name..."
+        
+        if ! systemctl is-active --quiet "psiphon@$name"; then
+            log_error "Service psiphon@$name is NOT active."
             continue
         fi
 
         # Check connectivity
-        local ip_info=$(curl --connect-timeout 5 --socks5 127.0.0.1:$port -s https://ipapi.co/json || echo "failed")
+        local ip_info=$(curl --connect-timeout 5 --socks5 127.0.0.1:$socks_port -s https://ipapi.co/json || echo "failed")
         
         if [[ "$ip_info" == "failed" ]]; then
-            log_error "Port $port: Connection failed."
+            log_error "$name (Port $socks_port): Connection failed."
         else
             local ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "Unknown")
-            local country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "Unknown")
-            log_success "Port $port: Online | IP: $ip | Country: $country"
+            local actual_country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "Unknown")
+            
+            if [[ "$actual_country" == "$country" ]]; then
+                 log_success "$name: Online | IP: $ip | Country: $actual_country (MATCH)"
+            else
+                 log_warn "$name: Online | IP: $ip | Country: $actual_country (EXPECTED: $country)"
+            fi
         fi
     done
 }
@@ -239,30 +198,32 @@ monitor_mode() {
         echo "=== Psiphon Instances Monitor ==="
         date
         echo ""
-        printf "%-10s %-10s %-15s %-10s\n" "Port" "Status" "IP" "Country"
-        echo "------------------------------------------------"
+        printf "%-15s %-10s %-10s %-10s %-15s %-10s\n" "Instance" "Status" "HTTP" "SOCKS" "IP" "Country"
+        echo "----------------------------------------------------------------------------"
         
-        for port in "${PORTS[@]}"; do
+        for instance in "${INSTANCES[@]}"; do
+            IFS='|' read -r name country http_port socks_port <<< "$instance"
+            
             status="DOWN"
-            if systemctl is-active --quiet "psiphon-${port}"; then
+            if systemctl is-active --quiet "psiphon@$name"; then
                 status="UP"
             fi
             
             if [[ "$status" == "UP" ]]; then
-                ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$port -s https://ipapi.co/json 2>/dev/null)
+                ip_info=$(curl --connect-timeout 2 --socks5 127.0.0.1:$socks_port -s https://ipapi.co/json 2>/dev/null)
                 if [[ -z "$ip_info" ]]; then
                      ip="Unreachable"
-                     country="-"
+                     actual_country="-"
                 else
                      ip=$(echo "$ip_info" | jq -r .ip 2>/dev/null || echo "-")
-                     country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "-")
+                     actual_country=$(echo "$ip_info" | jq -r .country_code 2>/dev/null || echo "-")
                 fi
             else
                 ip="-"
-                country="-"
+                actual_country="-"
             fi
             
-            printf "%-10s %-10s %-15s %-10s\n" "$port" "$status" "$ip" "$country"
+            printf "%-15s %-10s %-10s %-10s %-15s %-10s\n" "$name" "$status" "$http_port" "$socks_port" "$ip" "$actual_country"
         done
         
         echo ""
@@ -272,14 +233,23 @@ monitor_mode() {
 }
 
 logs_mode() {
-    local port="${1:-8080}"
-    local log_file="${LOG_DIR}/psiphon-${port}.log"
-    echo "Logs for Port $port:"
-    if [[ -f "$log_file" ]]; then
-        tail -n 20 "$log_file"
-    else
-        echo "Log file not found at $log_file"
-    fi
+    local name="${1:-psiphon-us}"
+    echo "Logs for $name:"
+    journalctl -u "psiphon@$name" -n 50 -f
+}
+
+cleanup() {
+    log_info "Cleaning up old instances..."
+    # Stop all potential psiphon services
+    systemctl stop "psiphon@*" 2>/dev/null || true
+    
+    # Try to clean up legacy services from previous version
+    for i in {8080..8085}; do
+        systemctl stop "psiphon-$i" 2>/dev/null || true
+        systemctl disable "psiphon-$i" 2>/dev/null || true
+        rm -f "/etc/systemd/system/psiphon-$i.service"
+    done
+    systemctl daemon-reload
 }
 
 main() {
@@ -291,16 +261,22 @@ main() {
     elif [[ "$1" == "logs" ]]; then
         logs_mode "$2"
         exit 0
+    elif [[ "$1" == "cleanup" ]]; then
+        cleanup
+        exit 0
     fi
 
     install_dependencies
-    install_psiphon_core
-    configure_instances
+    cleanup # Stop old/conflicting services before starting new ones
+    setup_user
+    setup_instances
+    setup_systemd
+    start_instances
     verify_deployment
     
     log_success "Deployment complete."
     log_info "Run '$0 monitor' to start the monitoring dashboard."
-    log_info "Run '$0 logs <port>' to view logs."
+    log_info "Run '$0 logs <instance_name>' to view logs (e.g., psiphon-us)."
 }
 
 main "$@"
