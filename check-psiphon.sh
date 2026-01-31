@@ -16,7 +16,7 @@ readonly CYAN='\033[0;36m'
 readonly BOLD='\033[1m'
 readonly NC='\033[0m'
 
-readonly PORTS=(8080 8081 8082 8083 8084)
+readonly PORTS=(8080 8081 8082 8083 8084 8085 8086 8087 8088 8089)
 
 echo ""
 echo -e "${CYAN}${BOLD}╔═══════════════════════════════════════════════════════════════╗${NC}"
@@ -33,9 +33,25 @@ printf "${CYAN}║${NC} ${BOLD}%-8s${NC} ${CYAN}║${NC} ${BOLD}%-10s${NC} ${CYA
 printf "${CYAN}╠══════════╬════════════╬════════════╬══════════════════╬══════════╣${NC}\n"
 
 online_count=0
-total_count=${#PORTS[@]}
+configured_count=0
 
+# First, find which ports have services configured
+ACTIVE_PORTS=()
 for port in "${PORTS[@]}"; do
+    if [[ -f "/etc/systemd/system/psiphon-${port}.service" ]]; then
+        ACTIVE_PORTS+=($port)
+        ((configured_count++)) || true
+    fi
+done
+
+if [[ ${#ACTIVE_PORTS[@]} -eq 0 ]]; then
+    echo -e "${RED}No Psiphon services found. Run ./deploy-psiphon.sh to configure.${NC}"
+    exit 1
+fi
+
+total_count=${#ACTIVE_PORTS[@]}
+
+for port in "${ACTIVE_PORTS[@]}"; do
     service="psiphon-${port}"
     status_color="$RED"
     svc_status="STOPPED"
