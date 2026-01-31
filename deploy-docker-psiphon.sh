@@ -104,13 +104,13 @@ deploy_containers() {
         log_info "Starting $container_name (Port: $port, Country: $country)..."
         
         # We map host port $port to container port 1080 (default internal SOCKS port)
-        # We pass arguments to the entrypoint to select region
+        # We must invoke python explicitly as the image likely has no entrypoint for flags
         docker run -d \
             --name "$container_name" \
             --restart always \
             -p "${port}:1080" \
             "$DOCKER_IMAGE" \
-            -r "$country"
+            python psi_client.py -r "$country" -e
             
         if [ $? -eq 0 ]; then
             log_success "Container $container_name started."
