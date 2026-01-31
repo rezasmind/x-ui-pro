@@ -37,10 +37,13 @@ configured_count=0
 
 # First, find which ports have services configured
 ACTIVE_PORTS=()
-for port in "${PORTS[@]}"; do
-    if [[ -f "/etc/systemd/system/psiphon-${port}.service" ]]; then
-        ACTIVE_PORTS+=($port)
-        ((configured_count++)) || true
+for config in /etc/psiphon-core/configs/config-*.json; do
+    if [[ -f "$config" ]]; then
+        port=$(jq -r .LocalSocksProxyPort "$config" 2>/dev/null)
+        if [[ -n "$port" ]]; then
+            ACTIVE_PORTS+=($port)
+            ((configured_count++)) || true
+        fi
     fi
 done
 

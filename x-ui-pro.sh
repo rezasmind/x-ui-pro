@@ -462,107 +462,24 @@ MultiPsiphon="n"
 read -p $'\e[1;32;40m Do you want to deploy Multi-Port Psiphon instances? (y/n): \e[0m' MultiPsiphon
 
 if [[ "$MultiPsiphon" == "y" ]]; then
-    # Detect server country to exclude
-    SERVER_COUNTRY=$(curl -s --connect-timeout 5 https://ipapi.co/country_code 2>/dev/null || echo "XX")
-    msg_inf "Server country detected: $SERVER_COUNTRY (will be excluded)"
+    # Delegate to the specialized deployment script
+    msg_inf "Delegating to Psiphon Deployment Manager..."
     
-    # Available countries (excluding server's country)
-    ALL_COUNTRIES="AT AU BE BG BR CA CH CZ DE DK EE ES FI FR GB HR HU IE IN IT JP LV NL NO PL PT RO RS SE SG SK UA US"
-    AVAILABLE_COUNTRIES=$(echo "$ALL_COUNTRIES" | tr ' ' '\n' | grep -v "^${SERVER_COUNTRY}$" | tr '\n' ' ')
-    
-    read -p $'\e[1;32;40m How many Psiphon instances? [1-10, default: 10]: \e[0m' INSTANCE_COUNT
-    INSTANCE_COUNT=${INSTANCE_COUNT:-10}
-    [[ ! "$INSTANCE_COUNT" =~ ^[0-9]+$ ]] || [[ "$INSTANCE_COUNT" -lt 1 ]] || [[ "$INSTANCE_COUNT" -gt 10 ]] && INSTANCE_COUNT=10
-    
-    # Generate ports array
-    PORTS=()
-    for ((i=0; i<INSTANCE_COUNT; i++)); do
-        PORTS+=($((8080 + i)))
-    done
-    
-    msg_inf "Select country mode:"
-    msg "  1) Auto-select random countries (recommended)"
-    msg "  2) Manually enter each country"
-    read -p $'\e[1;32;40m Choice [1/2, default: 1]: \e[0m' COUNTRY_MODE
-    COUNTRY_MODE=${COUNTRY_MODE:-1}
-    
-    declare -A INSTANCE_COUNTRIES
-    
-    if [[ "$COUNTRY_MODE" == "1" ]]; then
-        # Auto-select random countries
-        RANDOM_COUNTRIES=($(echo "$AVAILABLE_COUNTRIES" | tr ' ' '\n' | shuf | head -n $INSTANCE_COUNT))
-        idx=0
-        for port in "${PORTS[@]}"; do
-            INSTANCE_COUNTRIES[$port]="${RANDOM_COUNTRIES[$idx]}"
-            msg_ok "Port $port → ${RANDOM_COUNTRIES[$idx]}"
-            idx=$((idx + 1))
-        done
-    else
-        msg_inf "Available: $AVAILABLE_COUNTRIES"
-        for port in "${PORTS[@]}"; do
-            while true; do
-                read -p "Enter country for Port $port: " country
-                country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
-                if [[ "$country" =~ ^[A-Z]{2}$ ]] && [[ "$country" != "$SERVER_COUNTRY" ]]; then
-                    INSTANCE_COUNTRIES[$port]=$country
-                    break
-                else
-                    msg_err "Invalid or excluded country code."
-                fi
-            done
-        done
+    # Ensure script exists
+    if [[ ! -f "./deploy-psiphon.sh" ]]; then
+        msg_war "deploy-psiphon.sh not found. Downloading..."
+        wget -qO deploy-psiphon.sh https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/deploy-psiphon.sh
+        chmod +x deploy-psiphon.sh
     fi
-
-    mkdir -p /var/log/psiphon
-    for port in "${PORTS[@]}"; do
-        country=${INSTANCE_COUNTRIES[$port]}
-        service_name="psiphon-${port}"
-        cache_dir="/var/cache/psiphon-${port}"
-        log_file="/var/log/psiphon/${service_name}.log"
-        mkdir -p "$cache_dir"
-        
-        cat > "/etc/systemd/system/${service_name}.service" <<EOF
-[Unit]
-Description=Psiphon Instance on Port $port ($country) - X-UI-PRO
-Documentation=https://github.com/rezasmind/x-ui-pro
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/warp-plus/
-Environment="HOME=/root"
-
-# Pure Psiphon (cfon) mode without WARP scanning or chaining
-# --cfon: Enable Psiphon mode with specific country
-# --bind: SOCKS5 proxy address
-# --cache-dir: Unique profile storage per instance
-ExecStart=/etc/warp-plus/warp-plus --cfon --country $country --bind 127.0.0.1:$port --cache-dir $cache_dir
-
-# Graceful shutdown
-ExecStop=/bin/kill -TERM \$MAINPID
-
-# Restart configuration with backoff
-Restart=always
-RestartSec=60
-StartLimitInterval=600
-StartLimitBurst=3
-
-# Resource limits
-LimitNOFILE=65535
-LimitNPROC=65535
-
-# Logging
-StandardOutput=append:$log_file
-StandardError=append:$log_file
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    done
+    
+    # Run deployment
+    chmod +x ./deploy-psiphon.sh
+    ./deploy-psiphon.sh
+    
 else
-cat > /etc/systemd/system/warp-plus.service << EOF
+    # Legacy WARP+ Setup
+    msg_inf "Installing legacy WARP+..."
+    cat > /etc/systemd/system/warp-plus.service << EOF
 [Unit]
 Description=warp-plus service
 After=network.target nss-lookup.target
@@ -578,8 +495,11 @@ Restart=on-abort
 WantedBy=multi-user.target
 EOF
 fi
+
 ##########################################Install v2ray-core + v2rayA-webui#############################
 sudo sh -c "$(wget -qO- https://github.com/v2rayA/v2rayA-installer/raw/main/installer.sh)" @ --with-xray
+
+# Define Cron Tasks
 tasks=(
   "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
   "0 0 1 * * sudo su -c 'certbot renew --nginx --force-renewal --non-interactive --post-hook \"nginx -s reload\"' >> /var/log/certbot_renew.log 2>&1"
@@ -588,31 +508,11 @@ tasks=(
 )
 
 if [[ "$MultiPsiphon" == "y" ]]; then
-    msg_inf "Starting Psiphon instances with staggered delays to avoid API rate limits..."
-    msg_war "This will take approximately $((INSTANCE_COUNT * 35 / 60)) minutes. Please wait..."
-    systemctl daemon-reload
-    
-    # Start services with significant delay between each to prevent 429 errors
-    START_DELAY=35
-    current=1
-    for port in "${PORTS[@]}"; do
-        msg " [$current/$INSTANCE_COUNT] Starting psiphon-${port}..."
-        # Clean cache before start
-        rm -rf "/var/cache/psiphon-${port}/primary" 2>/dev/null || true
-        systemctl enable "psiphon-${port}" > /dev/null 2>&1 || true
-        systemctl start "psiphon-${port}" > /dev/null 2>&1 || true
-        
-        if [[ $current -lt $INSTANCE_COUNT ]]; then
-            msg "     Waiting ${START_DELAY}s before next service..."
-            sleep $START_DELAY
-        fi
-        current=$((current + 1))
-    done
-    
     service_enable "v2raya"
-    msg_ok "All Psiphon instances started."
+    # Note: Psiphon services are enabled/started by deploy-psiphon.sh
     
-    # Build dynamic port list for cron
+    # Add monitoring cron jobs for 10 ports
+    PORTS=($(seq 8080 8089))
     PORT_LIST=$(printf "psiphon-%s " "${PORTS[@]}")
     tasks+=("0 0 * * * sudo su -c 'x-ui restart > /dev/null 2>&1 && systemctl reload v2raya $PORT_LIST tor'")
     
