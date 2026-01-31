@@ -1,6 +1,6 @@
 #!/bin/bash
-# deploy-docker-psiphon-fixed.sh
-# Fixes "port already allocated" error by strictly cleaning specific ports
+# deploy-docker-psiphon-v2.sh
+# Fixes "No such file or directory" error by using correct container path
 # Deploys 5 concurrent instances on ports 8080-8084
 
 set -e
@@ -52,29 +52,25 @@ install_dependencies() {
         log_info "Installing missing packages:$pkgs..."
         apt-get update -qq && apt-get install -y $pkgs -qq
     fi
-    log_success "Dependencies installed."
 }
 
 clean_old_instances() {
-    log_info "Cleaning up..."
+    log_info "Cleaning up old instances..."
     
     for port in "${PORTS[@]}"; do
         # 1. Stop Native Services
         systemctl stop "psiphon-${port}" 2>/dev/null || true
         
-        # 2. Stop ANY Docker container using this port (regardless of name)
-        # We look for containers publishing the specific port
+        # 2. Stop ANY Docker container using this port
         local conflicting_container=$(docker ps -a --format '{{.ID}}' --filter "publish=$port")
-        
         if [[ -n "$conflicting_container" ]]; then
-            log_warn "Found container ($conflicting_container) holding port $port. Removing..."
+            log_warn "Freeing port $port (Container: $conflicting_container)..."
             docker rm -f $conflicting_container >/dev/null
         fi
 
-        # 3. Double check specifically for our named containers (just in case network wasn't bound yet)
+        # 3. Stop named containers
         local named_container="${CONTAINER_PREFIX}-${port}"
         if docker ps -a --format '{{.Names}}' | grep -q "^${named_container}$"; then
-            log_info "Removing named container $named_container..."
             docker rm -f "$named_container" >/dev/null
         fi
     done
@@ -82,15 +78,10 @@ clean_old_instances() {
     # Prune networks
     docker network prune -f >/dev/null 2>&1 || true
     
-    # 4. Aggressive Process Kill (Native processes)
-    # If Docker didn't hold the port, maybe Apache/Nginx/Python is holding it
-    log_info "Ensuring ports are fully released on host..."
+    # 4. Aggressive Process Kill (Host level)
     for port in "${PORTS[@]}"; do
         if command -v fuser &> /dev/null; then
             fuser -k -9 "${port}/tcp" 2>/dev/null || true
-        fi
-        if command -v lsof &> /dev/null; then
-            lsof -ti :$port | xargs -r kill -9 2>/dev/null || true
         fi
     done
     
@@ -102,43 +93,46 @@ deploy_containers() {
     
     declare -A INSTANCE_COUNTRIES
     
-    echo "-------------------------------------------------------"
-    echo "Configuration (Press Enter to use default: US)"
-    echo "-------------------------------------------------------"
-
+    # Defaulting to US to skip manual entry for automated runs, 
+    # or you can uncomment the loop below to ask for input.
     for port in "${PORTS[@]}"; do
-        read -p "Enter country for Port $port [US]: " country
-        country=${country:-US}
-        country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
-        INSTANCE_COUNTRIES[$port]=$country
+        INSTANCE_COUNTRIES[$port]="US"
     done
 
-    # Pull image
-    log_info "Ensuring Docker image is up to date..."
+    # If you want to ask for countries manually, uncomment these lines:
+    # echo "Enter country codes (e.g., US, DE, GB). Press Enter for default [US]."
+    # for port in "${PORTS[@]}"; do
+    #     read -p "Port $port: " country
+    #     country=${country:-US}
+    #     INSTANCE_COUNTRIES[$port]=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+    # done
+
+    log_info "Pulling Docker image (this may take a moment)..."
     docker pull "$DOCKER_IMAGE" >/dev/null
 
     for port in "${PORTS[@]}"; do
         country=${INSTANCE_COUNTRIES[$port]}
         container_name="${CONTAINER_PREFIX}-${port}"
         
-        # Check one last time if port is free
+        # Double check port is free
         if netstat -tuln | grep -q ":$port "; then
-            log_error "Port $port is still occupied! Skipping..."
+            log_error "Port $port is still occupied. Skipping."
             continue
         fi
 
         log_info "Starting $container_name (Port: $port, Country: $country)..."
         
-        # Run Container
+        # --- FIXED COMMAND HERE ---
+        # We use 'sh -c' to navigate to /root/psiphon before running the python script
         docker run -d \
             --name "$container_name" \
             --restart always \
             -p "${port}:1080" \
             "$DOCKER_IMAGE" \
-            python psi_client.py -r "$country" -e >/dev/null
+            sh -c "cd /root/psiphon && python psi_client.py -r $country -e"
             
         if [ $? -eq 0 ]; then
-            log_success "Started $container_name on :$port"
+            log_success "Started $container_name"
         else
             log_error "Failed to start $container_name"
         fi
@@ -146,9 +140,8 @@ deploy_containers() {
 }
 
 monitor_mode() {
-    # Check for jq
     if ! command -v jq &> /dev/null; then
-        echo "Error: jq is required for monitoring. Run install first."
+        echo "Error: jq is required. Run script again to install it."
         exit 1
     fi
 
@@ -166,15 +159,13 @@ monitor_mode() {
             ip="-"
             loc="-"
             
-            # Check Docker Status
             if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
                 status="UP"
             fi
             
-            # Check Connectivity if UP
             if [[ "$status" == "UP" ]]; then
-                # Timeout set to 3 seconds to prevent UI lag
-                ip_json=$(curl --connect-timeout 3 --socks5 127.0.0.1:$port -s https://ipapi.co/json || echo "")
+                # Checking connectivity through the proxy
+                ip_json=$(curl --connect-timeout 2 --socks5 127.0.0.1:$port -s https://ipapi.co/json || echo "")
                 
                 if [[ -n "$ip_json" ]]; then
                     ip=$(echo "$ip_json" | jq -r .ip 2>/dev/null || echo "Err")
@@ -182,10 +173,6 @@ monitor_mode() {
                 else
                     ip="Connecting..."
                 fi
-            fi
-            
-            # Colorize Status
-            if [[ "$status" == "UP" ]]; then
                 status_disp="${GREEN}${status}${NC}"
             else
                 status_disp="${RED}${status}${NC}"
@@ -213,8 +200,8 @@ main() {
     deploy_containers
     
     echo ""
-    log_success "Deployment finished."
-    log_info "Run: './deploy-docker-psiphon-fixed.sh monitor' to see status."
+    log_success "Deployment complete."
+    log_info "Run: './deploy-docker-psiphon-v2.sh monitor' to see status."
 }
 
 main "$@"
