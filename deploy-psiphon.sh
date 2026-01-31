@@ -86,7 +86,9 @@ create_config() {
     "LocalSocksProxyPort": $port,
     "EgressRegion": "$country",
     "DataRootDirectory": "$data_dir",
-    "NetworkID": "X-UI-PRO-$port"
+    "NetworkID": "X-UI-PRO-$port",
+    "PropagationChannelId": "FFFFFFFFFFFFFFFF",
+    "SponsorId": "1"
 }
 EOF
 }
