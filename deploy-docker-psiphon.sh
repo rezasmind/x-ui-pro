@@ -52,14 +52,22 @@ clean_old_instances() {
         systemctl disable "psiphon-${port}" 2>/dev/null || true
     done
     
-    # Stop docker containers
-    for port in "${PORTS[@]}"; do
-        container_name="${CONTAINER_PREFIX}-${port}"
-        if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+    # Stop docker containers more aggressively
+    log_info "Stopping and removing Docker containers with prefix $CONTAINER_PREFIX..."
+    containers=$(docker ps -a --filter "name=${CONTAINER_PREFIX}" --format '{{.Names}}' 2>/dev/null || true)
+    if [[ -n "$containers" ]]; then
+        echo "$containers" | while read container_name; do
             log_info "Removing container $container_name..."
-            docker rm -f "$container_name" >/dev/null
-        fi
-    done
+            docker rm -f "$container_name" 2>/dev/null || true
+        done
+    fi
+    
+    # Clean up Docker networks to release port bindings
+    log_info "Cleaning up Docker networks..."
+    docker network prune -f 2>/dev/null || true
+    
+    # Wait for ports to be released
+    sleep 2
     
     # Kill any lingering processes on ports (Aggressive Cleanup)
     log_info "Force-killing processes on ports ${PORTS[*]}..."
