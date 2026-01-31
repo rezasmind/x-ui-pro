@@ -43,6 +43,18 @@ install_dependencies() {
             install_list+=("$dep")
         fi
     done
+
+    if ! command -v ss &> /dev/null; then
+        if command -v apt &> /dev/null; then
+            install_list+=("iproute2")
+        elif command -v dnf &> /dev/null; then
+            install_list+=("iproute")
+        fi
+    fi
+
+    if ! command -v fuser &> /dev/null; then
+        install_list+=("psmisc")
+    fi
     
     if [[ ${#install_list[@]} -gt 0 ]]; then
         log_info "Installing dependencies: ${install_list[*]}"
@@ -52,6 +64,36 @@ install_dependencies() {
             dnf install -y -q "${install_list[@]}"
         fi
     fi
+}
+
+free_port() {
+    local port="$1"
+
+    systemctl stop "psiphon-${port}" 2>/dev/null || true
+    systemctl kill --kill-who=main --signal=KILL "psiphon-${port}" 2>/dev/null || true
+
+    if command -v fuser &> /dev/null; then
+        fuser -k "${port}/tcp" 2>/dev/null || true
+    fi
+
+    if command -v ss &> /dev/null; then
+        local pids
+        pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u | tr '\n' ' ')
+        for pid in $pids; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
+
+        local waited=0
+        while ss -ltn "sport = :${port}" 2>/dev/null | grep -q ":${port}"; do
+            sleep 1
+            waited=$((waited + 1))
+            if [[ $waited -ge 30 ]]; then
+                return 1
+            fi
+        done
+    fi
+
+    return 0
 }
 
 install_psiphon_core() {
@@ -122,8 +164,7 @@ configure_instances() {
     for port in "${PORTS[@]}"; do
         systemctl stop "psiphon-${port}" 2>/dev/null || true
         systemctl disable "psiphon-${port}" 2>/dev/null || true
-        # Kill any process using the port to prevent "SocksProxyPortInUse" error
-        fuser -k "${port}/tcp" 2>/dev/null || true
+        free_port "$port" || true
     done
 
     # Generate Systemd Services
@@ -146,6 +187,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$PSIPHON_DIR
+ExecStartPre=/bin/bash -c 'port=$port; if command -v fuser >/dev/null 2>&1; then fuser -k "${port}/tcp" 2>/dev/null || true; fi; if command -v ss >/dev/null 2>&1; then pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n "s/.*pid=\\([0-9]\\+\\).*/\\1/p" | sort -u); for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done; waited=0; while ss -ltn "sport = :${port}" 2>/dev/null | grep -q ":${port}"; do sleep 1; waited=$((waited+1)); if [ "$waited" -ge 30 ]; then exit 1; fi; done; fi; exit 0'
 ExecStart=$BIN_PATH -config $config_file -formatNotices json
 Restart=always
 RestartSec=10
