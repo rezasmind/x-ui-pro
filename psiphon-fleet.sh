@@ -5,7 +5,7 @@
 #  Purpose: Deploy N isolated Psiphon instances with zero cross-contamination
 #  Each instance runs in its own namespace with dedicated ports and country routing
 #═══════════════════════════════════════════════════════════════════════════════════════════════════
-set -e
+# Note: Removed 'set -e' to prevent premature exits on non-critical failures
 trap 'echo -e "\n\033[0;31m[ABORT]\033[0m Script interrupted."; exit 130' INT
 
 # Root check
@@ -302,9 +302,8 @@ StandardError=append:${log_file}
 # Security hardening
 PrivateTmp=true
 NoNewPrivileges=false
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${DATA_DIR}/${instance_id} ${LOG_DIR} ${instance_dir}
+ProtectSystem=false
+ProtectHome=false
 
 # Prevent OOM killer
 OOMScoreAdjust=-500
@@ -426,11 +425,12 @@ deploy_fleet() {
     # Start services with staggered delays for isolation
     log_info "Starting fleet with staggered delays for complete isolation..."
     local count=0
+    local total=${#FLEET_INSTANCES[@]}
     for instance_id in "${!FLEET_INSTANCES[@]}"; do
         IFS=':' read -r country port <<< "${FLEET_INSTANCES[$instance_id]}"
-        ((count++))
-        echo -ne "  [${count}/${#FLEET_INSTANCES[@]}] Starting ${CYAN}${instance_id}${NC}..."
-        systemctl start "psiphon-fleet@${instance_id}"
+        count=$((count + 1))
+        echo -ne "  [${count}/${total}] Starting ${CYAN}${instance_id}${NC}..."
+        systemctl start "psiphon-fleet@${instance_id}" 2>/dev/null || true
         
         if systemctl is-active --quiet "psiphon-fleet@${instance_id}"; then
             echo -e " ${GREEN}✓${NC}"
