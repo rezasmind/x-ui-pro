@@ -331,50 +331,60 @@ interactive_setup() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    # Show available countries
+    # Show available countries in a clean grid format
     echo -e "${WHITE}Available Countries:${NC}"
-    local col=0
-    for code in "${!COUNTRY_NAMES[@]}"; do
-        printf "  ${GREEN}%-4s${NC} %-18s" "$code" "${COUNTRY_NAMES[$code]}"
-        ((col++))
-        [[ $((col % 4)) -eq 0 ]] && echo ""
-    done
     echo ""
+    echo -e "  ${GREEN}US${NC}  United States     ${GREEN}DE${NC}  Germany          ${GREEN}GB${NC}  United Kingdom   ${GREEN}NL${NC}  Netherlands"
+    echo -e "  ${GREEN}FR${NC}  France            ${GREEN}SG${NC}  Singapore        ${GREEN}JP${NC}  Japan            ${GREEN}CA${NC}  Canada"
+    echo -e "  ${GREEN}AU${NC}  Australia         ${GREEN}CH${NC}  Switzerland      ${GREEN}SE${NC}  Sweden           ${GREEN}NO${NC}  Norway"
+    echo -e "  ${GREEN}AT${NC}  Austria           ${GREEN}BE${NC}  Belgium          ${GREEN}CZ${NC}  Czech Republic   ${GREEN}DK${NC}  Denmark"
+    echo -e "  ${GREEN}ES${NC}  Spain             ${GREEN}FI${NC}  Finland          ${GREEN}HU${NC}  Hungary          ${GREEN}IE${NC}  Ireland"
+    echo -e "  ${GREEN}IT${NC}  Italy             ${GREEN}PL${NC}  Poland           ${GREEN}PT${NC}  Portugal         ${GREEN}RO${NC}  Romania"
+    echo -e "  ${GREEN}SK${NC}  Slovakia          ${GREEN}IN${NC}  India            ${GREEN}BR${NC}  Brazil"
     echo ""
     
     # Get number of instances
-    local num_instances
-    while true; do
-        read -rp $'\e[1;32m How many Psiphon instances do you want? (1-20): \e[0m' num_instances
-        if [[ "$num_instances" =~ ^[0-9]+$ ]] && [[ "$num_instances" -ge 1 ]] && [[ "$num_instances" -le 20 ]]; then
-            break
+    local num_instances=""
+    while [[ -z "$num_instances" ]] || ! [[ "$num_instances" =~ ^[0-9]+$ ]] || [[ "$num_instances" -lt 1 ]] || [[ "$num_instances" -gt 20 ]]; do
+        echo -ne "${GREEN}How many Psiphon instances do you want? (1-20) [5]: ${NC}"
+        read -r num_instances
+        num_instances="${num_instances:-5}"
+        if ! [[ "$num_instances" =~ ^[0-9]+$ ]] || [[ "$num_instances" -lt 1 ]] || [[ "$num_instances" -gt 20 ]]; then
+            echo -e "${RED}Please enter a number between 1 and 20${NC}"
+            num_instances=""
         fi
-        echo -e "${RED}Please enter a number between 1 and 20${NC}"
     done
     
     echo ""
     log_info "Configuring $num_instances instance(s)..."
     echo ""
     
+    # Valid country codes
+    local valid_countries="US DE GB NL FR SG JP CA AU CH SE NO AT BE CZ DK ES FI HU IE IT PL PT RO SK IN BR"
+    
     # Configure each instance
     for ((i=1; i<=num_instances; i++)); do
-        local country
-        while true; do
-            read -rp $'\e[1;33m Instance '"$i"': Enter country code (e.g., US, DE, GB): \e[0m' country
+        local country=""
+        while [[ -z "$country" ]]; do
+            echo -ne "${YELLOW}Instance $i - Enter country code (e.g., US, DE, GB): ${NC}"
+            read -r country
             country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
-            if [[ -n "${COUNTRY_NAMES[$country]}" ]]; then
-                break
+            
+            # Validate country code
+            if [[ ! " $valid_countries " =~ " $country " ]]; then
+                echo -e "${RED}Invalid country code '$country'. Use one from the list above.${NC}"
+                country=""
             fi
-            echo -e "${RED}Invalid country code. Use one from the list above.${NC}"
         done
         
-        local port=$(get_random_port)
+        local port
+        port=$(get_random_port)
         local instance_id="psiphon-${country,,}-${port}"
         
         # Store in fleet
         FLEET_INSTANCES["$instance_id"]="${country}:${port}"
         
-        echo -e "  ${GREEN}→${NC} Instance ${WHITE}#${i}${NC}: ${CYAN}${instance_id}${NC} -> ${COUNTRY_NAMES[$country]} on port ${YELLOW}${port}${NC}"
+        echo -e "  ${GREEN}✓${NC} Instance #${i}: ${CYAN}${instance_id}${NC} -> ${country} on port ${YELLOW}${port}${NC}"
     done
     
     echo ""
