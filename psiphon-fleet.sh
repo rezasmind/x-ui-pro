@@ -202,6 +202,7 @@ create_docker_container() {
     local container_name="${CONTAINER_PREFIX}-${instance_id}"
     local country_name="${COUNTRY_NAMES[$country]:-$country}"
     local config_volume="${CONFIG_DIR}/${instance_id}"
+    local http_port=$((socks_port + 1000))  # HTTP port = SOCKS port + 1000
     
     # Create config directory for this instance
     mkdir -p "$config_volume"
@@ -209,25 +210,25 @@ create_docker_container() {
     # Remove any existing config to force fresh start with new egress region
     rm -f "${config_volume}/psiphon.config" 2>/dev/null
     
-    log_info "Creating container: ${container_name} [${country_name}:${socks_port}]"
+    log_info "Creating container: ${container_name} [${country_name}] SOCKS:${socks_port} HTTP:${http_port}"
     
     # Stop and remove existing container if exists
     docker stop "$container_name" 2>/dev/null || true
     docker rm "$container_name" 2>/dev/null || true
     
-    # Create and start the container with proper port mapping and environment
-    # Internal ports: 1080 (SOCKS), 8080 (HTTP) mapped to host ports
+    # Create and start the container with --network host
+    # Each container listens on its own unique SOCKS_PORT directly on host
     docker run -d \
         --name "$container_name" \
         --restart=always \
         --memory="512m" \
         --cpus="1.0" \
-        -p "${socks_port}:1080" \
+        --network host \
         -v "$config_volume:/config" \
         -e PUID=1000 \
         -e PGID=1000 \
-        -e SOCKS_PORT=1080 \
-        -e HTTP_PORT=8080 \
+        -e SOCKS_PORT="$socks_port" \
+        -e HTTP_PORT="$http_port" \
         -e EGRESS_REGION="$country" \
         --label "psiphon-fleet=true" \
         --label "country=$country" \
