@@ -598,8 +598,10 @@ uninstall_fleet() {
     read -rp "Are you sure? This removes ALL containers and data (y/N): " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && { log_info "Cancelled."; return; }
     
-    # Stop and remove all fleet containers
-    for container in $(docker ps -a --filter "label=psiphon-fleet=true" --format "{{.Names}}"); do
+    # Stop and remove all containers with 'psiphon' in the name
+    log_info "Removing all Psiphon containers..."
+    for container in $(docker ps -a --format "{{.Names}}" | grep -i psiphon); do
+        echo -e "  ${YELLOW}Removing:${NC} $container"
         docker stop "$container" 2>/dev/null || true
         docker rm "$container" 2>/dev/null || true
     done
@@ -611,11 +613,9 @@ uninstall_fleet() {
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-# Usage
-#───────────────────────────────────────────────────────────────────────────────────────────────────
 show_usage() {
     cat << USAGE
-${CYAN}PSIPHON FLEET COMMANDER v3.0${NC}
+${CYAN}PSIPHON FLEET COMMANDER v4.0 (Docker)${NC}
 
 ${WHITE}Usage:${NC}
   $0 install              - Interactive setup and deploy fleet
@@ -625,6 +625,9 @@ ${WHITE}Usage:${NC}
   $0 restart [instance]   - Restart instance(s)
   $0 logs [instance] [n]  - Show logs (default: all, 50 lines)
   $0 generate-xui         - Generate X-UI outbounds and routing
+  $0 add <country>        - Add new instance for country
+  $0 clean                - Remove ALL Psiphon containers (no prompt)
+  $0 uninstall            - Remove all fleet instances (with prompt)d routing
   $0 add <country>        - Add new instance for country
   $0 uninstall            - Remove all fleet instances
 
@@ -711,6 +714,15 @@ main() {
             install_dependencies
             check_docker
             add_instance "$2"
+            ;;
+        clean)
+            log_warn "Cleaning all Psiphon containers..."
+            for container in $(docker ps -a --format "{{.Names}}" | grep -i psiphon); do
+                echo -e "  ${YELLOW}Removing:${NC} $container"
+                docker stop "$container" 2>/dev/null || true
+                docker rm "$container" 2>/dev/null || true
+            done
+            log_success "All Psiphon containers removed"
             ;;
         uninstall)
             uninstall_fleet
