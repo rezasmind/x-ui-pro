@@ -1,20 +1,10 @@
 #!/bin/bash
-#═══════════════════════════════════════════════════════════════════════════════
-#  PSIPHON MANAGER v5.0 - Production-Ready Multi-Instance Deployment
-#  Uses native psiphon-tunnel-core with proper configuration
-#  Each instance has its own: config, data directory, process, and ports
-#═══════════════════════════════════════════════════════════════════════════════
-
 set -euo pipefail
 trap 'echo -e "\n\033[0;31m[ABORT]\033[0m Script interrupted."; exit 130' INT
 
-# Root check
 [[ $EUID -ne 0 ]] && { echo "Run as root!"; exec sudo "$0" "$@"; }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Configuration & Constants
-#───────────────────────────────────────────────────────────────────────────────
-readonly VERSION="5.0"
+readonly VERSION="5.1"
 readonly RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[0;33m'
 readonly BLUE='\033[0;34m' CYAN='\033[0;36m' MAGENTA='\033[0;35m'
 readonly WHITE='\033[1;37m' NC='\033[0m' BOLD='\033[1m' DIM='\033[2m'
@@ -24,10 +14,10 @@ readonly CONFIG_DIR="${BASE_DIR}/configs"
 readonly DATA_DIR="${BASE_DIR}/data"
 readonly LOG_DIR="/var/log/psiphon"
 readonly STATE_FILE="${BASE_DIR}/instances.state"
+readonly PORT_FILE="${BASE_DIR}/next_port"
 readonly BIN_PATH="${BASE_DIR}/psiphon-tunnel-core"
 readonly BIN_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
 
-# Countries with Psiphon servers
 declare -A COUNTRIES=(
     ["US"]="United States"    ["DE"]="Germany"        ["GB"]="United Kingdom"
     ["NL"]="Netherlands"      ["FR"]="France"         ["SG"]="Singapore"
@@ -38,12 +28,8 @@ declare -A COUNTRIES=(
     ["PL"]="Poland"           ["IN"]="India"          ["IE"]="Ireland"
 )
 
-# Instance storage: instance_id => "country:socks_port:http_port"
 declare -A INSTANCES=()
 
-#───────────────────────────────────────────────────────────────────────────────
-# Logging
-#───────────────────────────────────────────────────────────────────────────────
 log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -60,15 +46,12 @@ print_banner() {
 ║   ██╔═══╝ ╚════██║██║██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║                     ║
 ║   ██║     ███████║██║██║     ██║  ██║╚██████╔╝██║ ╚████║                     ║
 ║   ╚═╝     ╚══════╝╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝                     ║
-║                        MANAGER v5.0 - Native Binary Mode                      ║
+║                        MANAGER v5.1 - Native Binary Mode                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 EOF
     echo -e "${NC}"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# State Management
-#───────────────────────────────────────────────────────────────────────────────
 save_state() {
     mkdir -p "$BASE_DIR"
     : > "$STATE_FILE"
@@ -89,39 +72,20 @@ load_state() {
     return 1
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Port Management
-#───────────────────────────────────────────────────────────────────────────────
-declare -A RESERVED_PORTS=()
-
-is_port_available() {
-    local port="$1"
-    # Check if port is in use by any process
-    if ss -tuln 2>/dev/null | grep -q ":${port} "; then
-        return 1
+get_next_socks_port() {
+    mkdir -p "$BASE_DIR"
+    local current_port=10080
+    if [[ -f "$PORT_FILE" ]]; then
+        current_port=$(cat "$PORT_FILE")
     fi
-    # Check if we already reserved it
-    if [[ -n "${RESERVED_PORTS[$port]:-}" ]]; then
-        return 1
-    fi
-    return 0
+    local next_port=$((current_port + 1))
+    echo "$next_port" > "$PORT_FILE"
+    echo "$current_port"
 }
 
-find_available_port() {
-    local start="${1:-10000}"
-    local end="${2:-20000}"
-    local port
-    
-    for ((port = start; port <= end; port++)); do
-        if is_port_available "$port"; then
-            RESERVED_PORTS[$port]=1
-            echo "$port"
-            return 0
-        fi
-    done
-    
-    log_error "No available port found in range ${start}-${end}"
-    return 1
+get_next_http_port() {
+    local socks_port="$1"
+    echo $((socks_port + 5000))
 }
 
 kill_port() {
@@ -129,17 +93,13 @@ kill_port() {
     if command -v fuser &>/dev/null; then
         fuser -k "${port}/tcp" 2>/dev/null || true
     fi
-    # Also kill by searching ss output
     local pids
-    pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u)
+    pids=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u) || true
     for pid in $pids; do
         kill -9 "$pid" 2>/dev/null || true
     done
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Dependencies
-#───────────────────────────────────────────────────────────────────────────────
 install_dependencies() {
     log_step "Installing dependencies..."
     
@@ -147,24 +107,15 @@ install_dependencies() {
     local missing=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            missing+=("$dep")
-        fi
+        command -v "$dep" &>/dev/null || missing+=("$dep")
     done
     
-    # Check for ss (iproute2)
-    if ! command -v ss &>/dev/null; then
-        missing+=("iproute2")
-    fi
-    
-    # Check for fuser (psmisc)
-    if ! command -v fuser &>/dev/null; then
-        missing+=("psmisc")
-    fi
+    command -v ss &>/dev/null || missing+=("iproute2")
+    command -v fuser &>/dev/null || missing+=("psmisc")
     
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_info "Installing: ${missing[*]}"
-        if command -v apt &>/dev/null; then
+        if command -v apt-get &>/dev/null; then
             apt-get update -qq
             apt-get install -y -qq "${missing[@]}"
         elif command -v dnf &>/dev/null; then
@@ -174,57 +125,28 @@ install_dependencies() {
         fi
     fi
     
-    log_success "Dependencies installed"
+    log_success "Dependencies ready"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Psiphon Binary Management
-#───────────────────────────────────────────────────────────────────────────────
 download_psiphon() {
     log_step "Setting up Psiphon binary..."
     mkdir -p "$BASE_DIR" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
     
     if [[ -f "$BIN_PATH" ]] && [[ -x "$BIN_PATH" ]]; then
-        log_info "Psiphon binary already exists, checking for updates..."
-        local current_size
-        current_size=$(stat -c%s "$BIN_PATH" 2>/dev/null || echo 0)
-        
-        # Download to temp and compare
-        local temp_bin="${BIN_PATH}.new"
-        if wget -q -O "$temp_bin" "$BIN_URL" 2>/dev/null; then
-            local new_size
-            new_size=$(stat -c%s "$temp_bin" 2>/dev/null || echo 0)
-            
-            if [[ "$new_size" -gt 1000000 ]] && [[ "$new_size" != "$current_size" ]]; then
-                log_info "New version available, updating..."
-                mv "$temp_bin" "$BIN_PATH"
-                chmod +x "$BIN_PATH"
-                log_success "Psiphon binary updated"
-            else
-                rm -f "$temp_bin"
-                log_success "Psiphon binary is up to date"
-            fi
-        else
-            rm -f "$temp_bin"
-            log_warn "Could not check for updates, using existing binary"
-        fi
+        log_success "Psiphon binary exists: $BIN_PATH"
     else
         log_info "Downloading Psiphon binary..."
-        wget -q -O "$BIN_PATH" "$BIN_URL"
+        wget -q --show-progress -O "$BIN_PATH" "$BIN_URL"
         chmod +x "$BIN_PATH"
-        log_success "Psiphon binary downloaded: $BIN_PATH"
+        log_success "Psiphon binary downloaded"
     fi
     
-    # Verify binary works
     if ! "$BIN_PATH" --help &>/dev/null; then
-        log_error "Psiphon binary verification failed!"
+        log_error "Binary verification failed!"
         return 1
     fi
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Configuration Generation
-#───────────────────────────────────────────────────────────────────────────────
 create_config() {
     local instance_id="$1"
     local country="$2"
@@ -236,8 +158,7 @@ create_config() {
     
     mkdir -p "$data_path"
     
-    # Create a unique network ID for each instance to prevent conflicts
-    local network_id="PSIPHON-${instance_id}-$(date +%s%N)"
+    local network_id="PSIPHON-${instance_id}-$(date +%s)-$$"
     
     cat > "$config_file" << JSONEOF
 {
@@ -258,19 +179,13 @@ create_config() {
     "ConnectionWorkerPoolSize": 5,
     "LimitTunnelProtocols": ["OSSH", "SSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH"],
     "EmitDiagnosticNotices": true,
-    "EmitBytesTransferred": false,
-    "DisableLocalSocksProxy": false,
-    "DisableLocalHTTPProxy": false
+    "EmitBytesTransferred": false
 }
 JSONEOF
 
     chmod 600 "$config_file"
-    log_success "Config created: $config_file"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Systemd Service Creation
-#───────────────────────────────────────────────────────────────────────────────
 create_systemd_service() {
     local instance_id="$1"
     local country="$2"
@@ -288,38 +203,19 @@ create_systemd_service() {
 Description=Psiphon Proxy - ${country_name} (${country}) SOCKS:${socks_port} HTTP:${http_port}
 After=network-online.target
 Wants=network-online.target
-Documentation=https://github.com/Psiphon-Labs/psiphon-tunnel-core
 
 [Service]
 Type=simple
 User=root
-
-# Working directory for this instance
 WorkingDirectory=${data_path}
-
-# Pre-start: ensure clean port state
-ExecStartPre=/bin/bash -c 'for p in ${socks_port} ${http_port}; do fuser -k \${p}/tcp 2>/dev/null || true; done; sleep 1'
-
-# Main command - pass config file directly
+ExecStartPre=/bin/bash -c 'fuser -k ${socks_port}/tcp 2>/dev/null || true; fuser -k ${http_port}/tcp 2>/dev/null || true; sleep 1'
 ExecStart=${BIN_PATH} -config ${config_file}
-
-# Restart behavior
 Restart=always
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=300
-
-# Process limits
 LimitNOFILE=65535
-TasksMax=256
-
-# Logging
 StandardOutput=append:${log_file}
 StandardError=append:${log_file}
-
-# Security
 PrivateTmp=true
-NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target
@@ -328,9 +224,6 @@ SVCEOF
     chmod 644 "/etc/systemd/system/${service_name}.service"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Instance Management
-#───────────────────────────────────────────────────────────────────────────────
 create_instance() {
     local country="$1"
     country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
@@ -341,24 +234,21 @@ create_instance() {
         return 1
     fi
     
-    # Find available ports
-    local socks_port http_port
-    socks_port=$(find_available_port 10000 15000) || return 1
-    http_port=$(find_available_port 15001 20000) || return 1
-    
-    local instance_id="${country,,}-${socks_port}"
+    local socks_port http_port instance_id
+    socks_port=$(get_next_socks_port)
+    http_port=$(get_next_http_port "$socks_port")
+    instance_id="${country,,}-${socks_port}"
     
     log_info "Creating instance: ${instance_id} [${COUNTRIES[$country]}]"
     log_info "  SOCKS5: 127.0.0.1:${socks_port}"
     log_info "  HTTP:   127.0.0.1:${http_port}"
     
-    # Store instance
     INSTANCES["$instance_id"]="${country}:${socks_port}:${http_port}"
     
-    # Create config and service
     create_config "$instance_id" "$country" "$socks_port" "$http_port"
     create_systemd_service "$instance_id" "$country" "$socks_port" "$http_port"
     
+    log_success "Config created: ${CONFIG_DIR}/${instance_id}.json"
     return 0
 }
 
@@ -372,14 +262,13 @@ start_instance() {
     systemctl enable "$service_name" 2>/dev/null || true
     systemctl start "$service_name"
     
-    # Wait briefly and check status
-    sleep 2
+    sleep 3
     if systemctl is-active --quiet "$service_name"; then
-        log_success "${instance_id} started successfully"
+        log_success "${instance_id} started"
         return 0
     else
         log_error "${instance_id} failed to start"
-        journalctl -u "$service_name" --no-pager -n 5
+        journalctl -u "$service_name" --no-pager -n 5 2>/dev/null || true
         return 1
     fi
 }
@@ -391,7 +280,6 @@ stop_instance() {
     log_info "Stopping ${instance_id}..."
     systemctl stop "$service_name" 2>/dev/null || true
     
-    # Also kill any orphaned processes on the ports
     if [[ -n "${INSTANCES[$instance_id]:-}" ]]; then
         IFS=':' read -r _ socks_port http_port <<< "${INSTANCES[$instance_id]}"
         kill_port "$socks_port"
@@ -420,19 +308,14 @@ remove_instance() {
     log_success "${instance_id} removed"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Fleet Operations
-#───────────────────────────────────────────────────────────────────────────────
 stop_all() {
     log_step "Stopping all instances..."
     
-    # Stop via systemd
     for instance_id in "${!INSTANCES[@]}"; do
         stop_instance "$instance_id"
     done
     
-    # Also kill any stray psiphon processes
-    pkill -f psiphon-tunnel-core 2>/dev/null || true
+    pkill -9 -f psiphon-tunnel-core 2>/dev/null || true
     
     log_success "All instances stopped"
 }
@@ -441,11 +324,13 @@ start_all() {
     log_step "Starting all instances with staggered delays..."
     
     local count=0
+    local total=${#INSTANCES[@]}
+    
     for instance_id in "${!INSTANCES[@]}"; do
         ((count++)) || true
-        log_info "[$count/${#INSTANCES[@]}] Starting ${instance_id}..."
-        start_instance "$instance_id"
-        sleep 5  # Stagger start to avoid conflicts
+        log_info "[${count}/${total}] Starting ${instance_id}..."
+        start_instance "$instance_id" || true
+        sleep 5
     done
     
     log_success "All instances started"
@@ -457,9 +342,6 @@ restart_all() {
     start_all
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Interactive Setup
-#───────────────────────────────────────────────────────────────────────────────
 interactive_setup() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -467,7 +349,6 @@ interactive_setup() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    # Show available countries
     echo -e "${WHITE}Available Countries:${NC}"
     echo ""
     local cols=0
@@ -482,7 +363,6 @@ interactive_setup() {
     [[ $cols -gt 0 ]] && echo ""
     echo ""
     
-    # Get number of instances
     local num_instances
     while true; do
         echo -ne "${GREEN}How many Psiphon instances? (1-10) [5]: ${NC}"
@@ -496,10 +376,9 @@ interactive_setup() {
     
     echo ""
     
-    # Clear existing instances
     INSTANCES=()
+    echo "10080" > "$PORT_FILE"
     
-    # Configure each instance
     for ((i = 1; i <= num_instances; i++)); do
         local country
         while true; do
@@ -521,9 +400,6 @@ interactive_setup() {
     log_success "Configuration complete! ${#INSTANCES[@]} instances configured."
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Status & Verification
-#───────────────────────────────────────────────────────────────────────────────
 show_status() {
     echo ""
     echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -554,7 +430,6 @@ show_status() {
             status="UP"
             status_color="${GREEN}"
             
-            # Test SOCKS proxy
             local result
             result=$(timeout 15 curl --connect-timeout 10 --socks5 "127.0.0.1:${socks_port}" \
                      -s "https://ipapi.co/json" 2>/dev/null || echo "")
@@ -586,8 +461,7 @@ verify_all() {
     log_step "Verifying all instances (this may take a minute)..."
     echo ""
     
-    local success=0
-    local failed=0
+    local success=0 failed=0
     
     for instance_id in "${!INSTANCES[@]}"; do
         IFS=':' read -r country socks_port http_port <<< "${INSTANCES[$instance_id]}"
@@ -614,9 +488,6 @@ verify_all() {
     log_info "Results: ${success} working, ${failed} failed"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Log Viewing
-#───────────────────────────────────────────────────────────────────────────────
 show_logs() {
     local instance_id="${1:-}"
     local lines="${2:-50}"
@@ -641,9 +512,6 @@ show_logs() {
     fi
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# X-UI Integration
-#───────────────────────────────────────────────────────────────────────────────
 generate_xui_config() {
     echo ""
     log_step "Generating X-UI Configuration"
@@ -652,7 +520,6 @@ generate_xui_config() {
     local outbounds_file="${BASE_DIR}/xray-outbounds.json"
     local routing_file="${BASE_DIR}/xray-routing.json"
     
-    # Generate outbounds
     {
         echo '{"outbounds": ['
         echo '  {"tag": "direct", "protocol": "freedom", "settings": {}},'
@@ -675,7 +542,6 @@ EOF
     
     log_success "Outbounds saved: $outbounds_file"
     
-    # Generate routing rules
     {
         echo '{"routing": {"domainStrategy": "AsIs", "rules": ['
         
@@ -711,19 +577,11 @@ EOF
         echo -e "   ${YELLOW}user-${country,,}@x-ui${NC} -> exits via ${COUNTRIES[$country]}"
     done
     echo ""
-    echo "3. View full configs:"
-    echo "   cat $outbounds_file | jq ."
-    echo "   cat $routing_file | jq ."
-    echo ""
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Cleanup / Uninstall
-#───────────────────────────────────────────────────────────────────────────────
 cleanup_all() {
     log_warn "Cleaning up all Psiphon instances..."
     
-    # Stop all services
     for instance_id in "${!INSTANCES[@]}"; do
         local service_name="psiphon-${instance_id}"
         systemctl stop "$service_name" 2>/dev/null || true
@@ -731,11 +589,10 @@ cleanup_all() {
         rm -f "/etc/systemd/system/${service_name}.service"
     done
     
-    # Kill any remaining processes
     pkill -9 -f psiphon-tunnel-core 2>/dev/null || true
     
-    # Clear state
     INSTANCES=()
+    rm -f "$PORT_FILE"
     save_state
     
     systemctl daemon-reload
@@ -759,9 +616,6 @@ uninstall() {
     log_success "Psiphon Manager uninstalled"
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Quick Add
-#───────────────────────────────────────────────────────────────────────────────
 quick_add() {
     local country="$1"
     
@@ -769,7 +623,6 @@ quick_add() {
         save_state
         
         local instance_id
-        # Get the last added instance
         for id in "${!INSTANCES[@]}"; do
             instance_id="$id"
         done
@@ -784,9 +637,6 @@ quick_add() {
     fi
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Usage
-#───────────────────────────────────────────────────────────────────────────────
 show_usage() {
     cat << USAGE
 ${CYAN}PSIPHON MANAGER v${VERSION}${NC}
@@ -809,7 +659,7 @@ ${WHITE}Examples:${NC}
   $0 install              # Interactive setup wizard
   $0 add DE               # Add Germany instance
   $0 status               # Check all statuses
-  $0 logs us-10001 100    # View logs
+  $0 logs us-10081 100    # View logs
   $0 restart              # Restart all
 
 ${WHITE}Current Instances:${NC}
@@ -826,9 +676,6 @@ USAGE
     echo ""
 }
 
-#───────────────────────────────────────────────────────────────────────────────
-# Main
-#───────────────────────────────────────────────────────────────────────────────
 main() {
     print_banner
     load_state 2>/dev/null || true
@@ -837,7 +684,7 @@ main() {
         install)
             install_dependencies
             download_psiphon
-            cleanup_all  # Clean start
+            cleanup_all
             interactive_setup
             start_all
             echo ""
