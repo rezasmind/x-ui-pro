@@ -201,6 +201,10 @@ create_docker_container() {
     local country="$3"
     local container_name="${CONTAINER_PREFIX}-${instance_id}"
     local country_name="${COUNTRY_NAMES[$country]:-$country}"
+    local config_volume="${CONFIG_DIR}/${instance_id}"
+    
+    # Create config directory for this instance
+    mkdir -p "$config_volume"
     
     log_info "Creating container: ${container_name} [${country_name}:${socks_port}]"
     
@@ -208,13 +212,14 @@ create_docker_container() {
     docker stop "$container_name" 2>/dev/null || true
     docker rm "$container_name" 2>/dev/null || true
     
-    # Create and start the container with country routing
+    # Create and start the container with country routing and mounted config
     docker run -d \
         --name "$container_name" \
         --restart=always \
         --memory="512m" \
         --cpus="1.0" \
         --network host \
+        -v "$config_volume:/config" \
         -e COUNTRY="$country" \
         -e SOCKS_PORT="$socks_port" \
         --label "psiphon-fleet=true" \
