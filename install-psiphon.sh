@@ -1,10 +1,11 @@
 #!/bin/bash
 
-set -euo pipefail
+set -eo pipefail
 
 readonly VERSION="1.0"
 readonly INSTALL_DIR="/opt/psiphon-fleet"
 readonly REPO_URL="https://raw.githubusercontent.com/rezasmind/x-ui-pro/master"
+readonly NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
 
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -58,9 +59,10 @@ check_system() {
     local total_ram=$(free -g | awk '/^Mem:/{print $2}')
     if [[ $total_ram -lt 2 ]]; then
         log_warn "Low RAM detected (${total_ram}GB). Recommended: 4GB+"
-        read -p "Continue anyway? (y/N): " -n 1 -r
+        local continue="n"
+        read -t 30 -p "Continue anyway? (y/N): " -n 1 -r continue 2>/dev/null || true
         echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+        [[ ! "$continue" =~ ^[Yy]$ ]] && { log_error "Installation cancelled due to insufficient RAM"; exit 1; }
     fi
     
     local free_space=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
@@ -136,6 +138,11 @@ download_files() {
 }
 
 configure_countries() {
+    if [[ "$NON_INTERACTIVE" == "1" ]]; then
+        log_info "Using default countries: US, DE, GB, FR, NL, SG"
+        return
+    fi
+    
     log_info "Country configuration..."
     echo ""
     echo -e "${CYAN}Available countries:${NC}"
@@ -145,21 +152,16 @@ configure_countries() {
     echo "Default configuration: US, DE, GB, FR, NL, SG"
     echo ""
     
-    read -p "Do you want to customize countries? (y/N): " -n 1 -r
+    local customize="n"
+    read -t 30 -p "Do you want to customize countries? (y/N): " -n 1 -r customize 2>/dev/null || true
     echo
     
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        local countries=()
-        local ports=(10080 10081 10082 10083 10084 10085)
-        
-        for i in {0..5}; do
-            read -p "Country ${i} (port ${ports[$i]}): " country
-            countries+=("${country^^}")
-        done
-        
-        log_info "Customizing docker-compose.yml..."
+    if [[ "$customize" =~ ^[Yy]$ ]]; then
+        log_warn "Country customization requires manual editing of docker-compose-psiphon.yml"
+        log_info "After installation, edit: $INSTALL_DIR/docker-compose-psiphon.yml"
+        log_info "Then run: cd $INSTALL_DIR && ./psiphon-docker.sh rebuild"
     else
-        log_info "Using default countries"
+        log_info "Using default countries: US, DE, GB, FR, NL, SG"
     fi
 }
 
@@ -177,13 +179,21 @@ setup_systemd() {
 }
 
 setup_health_monitoring() {
+    if [[ "$NON_INTERACTIVE" == "1" ]]; then
+        (crontab -l 2>/dev/null | grep -v psiphon-health-check || true; \
+         echo "*/5 * * * * $INSTALL_DIR/psiphon-health-check.sh check") | crontab -
+        log_success "Health monitoring enabled (checks every 5 minutes)"
+        return
+    fi
+    
     log_info "Setting up health monitoring..."
     echo ""
-    read -p "Enable automatic health checks? (Y/n): " -n 1 -r
+    local enable="y"
+    read -t 30 -p "Enable automatic health checks? (Y/n): " -n 1 -r enable 2>/dev/null || true
     echo
     
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        (crontab -l 2>/dev/null | grep -v psiphon-health-check; \
+    if [[ ! "$enable" =~ ^[Nn]$ ]]; then
+        (crontab -l 2>/dev/null | grep -v psiphon-health-check || true; \
          echo "*/5 * * * * $INSTALL_DIR/psiphon-health-check.sh check") | crontab -
         log_success "Health monitoring enabled (checks every 5 minutes)"
     else
@@ -192,14 +202,23 @@ setup_health_monitoring() {
 }
 
 setup_backups() {
+    if [[ "$NON_INTERACTIVE" == "1" ]]; then
+        mkdir -p /var/backups/psiphon-fleet
+        (crontab -l 2>/dev/null | grep -v psiphon-backup || true; \
+         echo "0 2 * * * $INSTALL_DIR/psiphon-backup.sh backup") | crontab -
+        log_success "Daily backups enabled (2 AM daily)"
+        return
+    fi
+    
     log_info "Setting up automatic backups..."
     echo ""
-    read -p "Enable daily backups? (Y/n): " -n 1 -r
+    local enable="y"
+    read -t 30 -p "Enable daily backups? (Y/n): " -n 1 -r enable 2>/dev/null || true
     echo
     
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    if [[ ! "$enable" =~ ^[Nn]$ ]]; then
         mkdir -p /var/backups/psiphon-fleet
-        (crontab -l 2>/dev/null | grep -v psiphon-backup; \
+        (crontab -l 2>/dev/null | grep -v psiphon-backup || true; \
          echo "0 2 * * * $INSTALL_DIR/psiphon-backup.sh backup") | crontab -
         log_success "Daily backups enabled (2 AM daily)"
     else
@@ -255,10 +274,11 @@ print_summary() {
 uninstall() {
     log_warn "Starting uninstallation..."
     echo ""
-    read -p "This will remove all Psiphon containers and data. Continue? (y/N): " -n 1 -r
+    local confirm="n"
+    read -t 30 -p "This will remove all Psiphon containers and data. Continue? (y/N): " -n 1 -r confirm 2>/dev/null || true
     echo
     
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log_info "Uninstallation cancelled"
         exit 0
     fi
@@ -285,7 +305,7 @@ show_usage() {
     cat << EOF
 Psiphon Fleet Installer v${VERSION}
 
-Usage: $0 [COMMAND]
+Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
   install      Install Psiphon Fleet (default)
@@ -293,9 +313,23 @@ Commands:
   update       Update to latest version
   help         Show this help
 
+Environment Variables:
+  NON_INTERACTIVE=1    Skip all prompts, use defaults
+
 Examples:
-  curl -sSL https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/install-psiphon.sh | bash
+  # Interactive installation
   bash install-psiphon.sh install
+  
+  # Non-interactive installation (for automation)
+  NON_INTERACTIVE=1 bash install-psiphon.sh install
+  
+  # One-liner with curl
+  curl -sSL https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/install-psiphon.sh | bash
+  
+  # Non-interactive one-liner
+  curl -sSL https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/install-psiphon.sh | NON_INTERACTIVE=1 bash
+  
+  # Uninstall
   bash install-psiphon.sh uninstall
 
 Documentation:
