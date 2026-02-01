@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  psiphon-us:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-us
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10080
+      --cfon
+      --country US
+      --scan
+    volumes:
+      - ./warp-data/us:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  psiphon-de:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-de
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10081
+      --cfon
+      --country DE
+      --scan
+    volumes:
+      - ./warp-data/de:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  psiphon-gb:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-gb
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10082
+      --cfon
+      --country GB
+      --scan
+    volumes:
+      - ./warp-data/gb:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  psiphon-fr:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-fr
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10083
+      --cfon
+      --country FR
+      --scan
+    volumes:
+      - ./warp-data/fr:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  psiphon-nl:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-nl
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10084
+      --cfon
+      --country NL
+      --scan
+    volumes:
+      - ./warp-data/nl:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  psiphon-sg:
+    image: bigbugcc/warp-plus:latest
+    container_name: psiphon-sg
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+    command: >
+      -v
+      --bind 0.0.0.0:10085
+      --cfon
+      --country SG
+      --scan
+    volumes:
+      - ./warp-data/sg:/etc/warp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
