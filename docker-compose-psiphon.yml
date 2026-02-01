@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   psiphon-us:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-us
     restart: unless-stopped
     network_mode: host
@@ -24,7 +24,7 @@ services:
         max-file: "3"
 
   psiphon-de:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-de
     restart: unless-stopped
     network_mode: host
@@ -46,7 +46,7 @@ services:
         max-file: "3"
 
   psiphon-gb:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-gb
     restart: unless-stopped
     network_mode: host
@@ -68,7 +68,7 @@ services:
         max-file: "3"
 
   psiphon-fr:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-fr
     restart: unless-stopped
     network_mode: host
@@ -90,7 +90,7 @@ services:
         max-file: "3"
 
   psiphon-nl:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-nl
     restart: unless-stopped
     network_mode: host
@@ -112,7 +112,7 @@ services:
         max-file: "3"
 
   psiphon-sg:
-    image: bigbugcc/warp-plus:latest
+    image: warp-plus:fixed
     container_name: psiphon-sg
     restart: unless-stopped
     network_mode: host

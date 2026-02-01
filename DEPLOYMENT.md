@@ -1,8 +1,21 @@
 # Psiphon Multi-Instance Deployment Guide
 
+## 🚨 CRITICAL: Read This First!
+
+**IMPORTANT UPDATE (February 2026)**: The public Docker image `bigbugcc/warp-plus:latest` is **BROKEN** due to Go 1.25+ compatibility issues. This deployment uses a **custom-built image** with Go 1.24.3 to fix the TLS panic error.
+
+**Error Symptoms:**
+- Containers restart continuously
+- Logs show: `panic: tls: ConnectionState is not equal to tls.ConnectionState: struct field count mismatch: 17 vs 16`
+- Psiphon mode (`--cfon` flag) doesn't work
+
+**Solution:** This guide includes building a custom Docker image with Go 1.24.3. See [PSIPHON-TLS-ERROR-FIX.md](./PSIPHON-TLS-ERROR-FIX.md) for detailed technical information.
+
+---
+
 ## 📋 Overview
 
-This guide walks you through deploying **6 concurrent Psiphon instances** on a single VPS, each exiting through a different country. This is the **WORKING SOLUTION** using Docker containers with `bigbugcc/warp-plus` image.
+This guide walks you through deploying **6 concurrent Psiphon instances** on a single VPS, each exiting through a different country. This is the **WORKING SOLUTION** using Docker containers with a custom-built `warp-plus:fixed` image.
 
 ## 🎯 Architecture
 
@@ -73,11 +86,13 @@ docker compose version
 mkdir -p /opt/psiphon-fleet
 cd /opt/psiphon-fleet
 
-# Download docker-compose file
+# Download all required files
 wget https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/docker-compose-psiphon.yml
-
-# Download management script
 wget https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/psiphon-docker.sh
+wget https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/Dockerfile.warp-plus-fixed
+wget https://raw.githubusercontent.com/rezasmind/x-ui-pro/master/PSIPHON-TLS-ERROR-FIX.md
+
+# Make scripts executable
 chmod +x psiphon-docker.sh
 ```
 
@@ -85,13 +100,42 @@ Or if you have the files locally:
 
 ```bash
 # Upload to server
-scp docker-compose-psiphon.yml psiphon-docker.sh root@YOUR_SERVER_IP:/opt/psiphon-fleet/
+scp docker-compose-psiphon.yml psiphon-docker.sh Dockerfile.warp-plus-fixed root@YOUR_SERVER_IP:/opt/psiphon-fleet/
 
 # SSH into server
 ssh root@YOUR_SERVER_IP
 cd /opt/psiphon-fleet
 chmod +x psiphon-docker.sh
 ```
+
+### Step 2.5: Build Custom Docker Image (CRITICAL!)
+
+**This step is REQUIRED** to fix the TLS panic error:
+
+```bash
+cd /opt/psiphon-fleet
+
+# Build custom image with Go 1.24.3 (takes 5-10 minutes)
+docker build -f Dockerfile.warp-plus-fixed -t warp-plus:fixed .
+
+# Verify the build
+docker images warp-plus:fixed
+
+# Expected output:
+# REPOSITORY   TAG      IMAGE ID       CREATED         SIZE
+# warp-plus    fixed    abc123def456   2 minutes ago   ~50MB
+```
+
+**Why is this needed?**
+- Go 1.25+ broke Psiphon-TLS with struct field count mismatch
+- Custom image uses Go 1.24.3 which works correctly
+- Without this, all containers will crash with panic errors
+
+**Build Tips:**
+- Requires ~2GB free disk space
+- Takes 5-10 minutes depending on internet speed
+- If build fails, check `/tmp/warp-build.log` for errors
+- See [PSIPHON-TLS-ERROR-FIX.md](./PSIPHON-TLS-ERROR-FIX.md) for troubleshooting
 
 ### Step 3: Deploy Psiphon Fleet
 

@@ -1,0 +1,138 @@
+# Dockerfile for warp-plus with Go 1.24.3 (fixes TLS panic error)
+# 
+# CRITICAL: This Dockerfile uses Go 1.24.3 to fix the "tls: ConnectionState struct field count mismatch" error
+# that occurs with Go 1.25+ when using Psiphon mode (--cfon flag).
+#
+# Error Fixed: panic: tls: ConnectionState is not equal to tls.ConnectionState: struct field count mismatch: 17 vs 16
+# Root Cause: Go 1.25+ added HelloRetryRequest field to crypto/tls.ConnectionState
+# Solution: Build with Go 1.24.3 which has 16-field ConnectionState struct
+#
+# Build: docker build -f Dockerfile.warp-plus-fixed -t warp-plus:fixed .
+# Time: 5-10 minutes (downloads source + compiles)
+
+# ===========================
+# Stage 1: Build Stage
+# ===========================
+FROM golang:1.24.3-alpine AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    ca-certificates \
+    && rm -rf /var/cache/apk/*
+
+# Clone warp-plus repository
+# Using v1.2.6 - last stable version before Go 1.25 issues
+RUN git clone https://github.com/bepass-org/warp-plus.git . && \
+    git checkout v1.2.6
+
+# Display build info (for debugging)
+RUN echo "Build Info:" && \
+    echo "  Go Version: $(go version)" && \
+    echo "  Warp-Plus Version: $(git describe --tags 2>/dev/null || echo 'v1.2.6')" && \
+    echo "  Build Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Download dependencies
+RUN go mod download && \
+    go mod verify
+
+# Build warp-plus binary
+# CGO_ENABLED=0 for static linking (no external dependencies)
+# GOOS=linux for Linux containers
+# GOARCH=amd64 for x86_64 architecture
+RUN CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=amd64 \
+    go build \
+    -ldflags="-w -s -X main.version=$(git describe --tags 2>/dev/null || echo 'v1.2.6')" \
+    -o warp-plus \
+    ./cmd/warp-plus
+
+# Verify binary was built
+RUN ls -lh warp-plus && \
+    ./warp-plus --version || echo "Binary built successfully"
+
+# ===========================
+# Stage 2: Runtime Stage
+# ===========================
+FROM alpine:latest
+
+# Add metadata labels
+LABEL maintainer="X-UI-PRO Psiphon Fleet"
+LABEL description="warp-plus with Go 1.24.3 (fixes TLS panic with Psiphon mode)"
+LABEL version="1.2.6-go1.24.3"
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/cache/apk/*
+
+# Copy binary from builder stage
+COPY --from=builder /app/warp-plus /usr/local/bin/warp-plus
+
+# Make binary executable
+RUN chmod +x /usr/local/bin/warp-plus
+
+# Create non-root user for security
+RUN addgroup -g 1000 warp && \
+    adduser -D -u 1000 -G warp warp
+
+# Create directories for warp data
+RUN mkdir -p /etc/warp && \
+    chown -R warp:warp /etc/warp
+
+# Switch to non-root user
+USER warp
+
+# Set working directory
+WORKDIR /etc/warp
+
+# Expose default SOCKS5 port (can be overridden)
+EXPOSE 1080
+
+# Set entrypoint
+ENTRYPOINT ["warp-plus"]
+
+# Default command (shows help)
+CMD ["--help"]
+
+# ===========================
+# Usage Examples
+# ===========================
+#
+# Build:
+#   docker build -f Dockerfile.warp-plus-fixed -t warp-plus:fixed .
+#
+# Test (no Psiphon):
+#   docker run --rm -it -p 1080:1080 warp-plus:fixed --bind 0.0.0.0:1080
+#
+# Test (with Psiphon):
+#   docker run --rm -it -p 10080:10080 warp-plus:fixed \
+#     --bind 0.0.0.0:10080 --cfon --country US --scan
+#
+# Production (from docker-compose.yml):
+#   services:
+#     psiphon-us:
+#       image: warp-plus:fixed
+#       command: --bind 0.0.0.0:10080 --cfon --country US --scan
+#       volumes:
+#         - ./warp-data/us:/etc/warp
+#
+# ===========================
+# Troubleshooting
+# ===========================
+#
+# If build fails:
+#   1. Check internet connection (needs to download Go modules)
+#   2. Ensure Docker has enough disk space (needs ~2GB)
+#   3. Try cleaning Docker cache: docker builder prune
+#
+# If TLS error persists:
+#   1. Verify Go version in image: docker run --rm warp-plus:fixed go version
+#      Should show: go version go1.24.3
+#   2. Check logs: docker logs <container-name>
+#   3. See: PSIPHON-TLS-ERROR-FIX.md

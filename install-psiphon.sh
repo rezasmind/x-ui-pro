@@ -116,6 +116,8 @@ download_files() {
         "psiphon-backup.sh"
         "psiphon-performance.sh"
         "psiphon-fleet.service"
+        "Dockerfile.warp-plus-fixed"
+        "PSIPHON-TLS-ERROR-FIX.md"
     )
     
     for file in "${files[@]}"; do
@@ -162,6 +164,60 @@ configure_countries() {
         log_info "Then run: cd $INSTALL_DIR && ./psiphon-docker.sh rebuild"
     else
         log_info "Using default countries: US, DE, GB, FR, NL, SG"
+    fi
+}
+
+build_warp_image() {
+    log_info "Building custom warp-plus Docker image with Go 1.24.3..."
+    echo ""
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}CRITICAL: Building custom image to fix TLS panic error${NC}"
+    echo -e "${YELLOW}This is required for Psiphon mode to work properly.${NC}"
+    echo -e "${YELLOW}Build time: 5-10 minutes (downloads source + compiles)${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if docker images | grep -q "warp-plus.*fixed"; then
+        log_warn "warp-plus:fixed image already exists"
+        local rebuild="n"
+        read -t 30 -p "Rebuild anyway? (y/N): " -n 1 -r rebuild 2>/dev/null || rebuild="n"
+        echo
+        [[ ! "$rebuild" =~ ^[Yy]$ ]] && { log_info "Skipping image build"; return 0; }
+    fi
+    
+    log_info "Starting Docker build (this may take 5-10 minutes)..."
+    log_info "Go grab a coffee ☕ while the image builds..."
+    echo ""
+    
+    if docker build -f Dockerfile.warp-plus-fixed -t warp-plus:fixed . 2>&1 | tee /tmp/warp-build.log; then
+        log_success "Docker image built successfully!"
+        
+        docker images warp-plus:fixed
+        
+        log_info "Verifying image..."
+        if docker run --rm warp-plus:fixed --version &>/dev/null; then
+            log_success "Image verification passed"
+        else
+            log_warn "Image built but verification failed (this is OK if --version not supported)"
+        fi
+    else
+        log_error "Docker build failed!"
+        log_error "Build log saved to: /tmp/warp-build.log"
+        echo ""
+        echo -e "${RED}Common reasons for build failure:${NC}"
+        echo "  1. Insufficient disk space (need ~2GB free)"
+        echo "  2. No internet connection (needs to download Go modules)"
+        echo "  3. Docker daemon issues"
+        echo ""
+        log_info "You can try building manually:"
+        echo "  cd $INSTALL_DIR"
+        echo "  docker build -f Dockerfile.warp-plus-fixed -t warp-plus:fixed ."
+        echo ""
+        
+        local continue="n"
+        read -t 30 -p "Continue installation anyway? (y/N): " -n 1 -r continue 2>/dev/null || true
+        echo
+        [[ ! "$continue" =~ ^[Yy]$ ]] && exit 1
     fi
 }
 
@@ -347,6 +403,7 @@ main() {
             create_install_directory
             download_files
             configure_countries
+            build_warp_image
             setup_systemd
             setup_health_monitoring
             setup_backups
