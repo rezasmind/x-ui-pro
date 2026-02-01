@@ -1,11 +1,11 @@
 #!/bin/bash
 #═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  PSIPHON FLEET COMMANDER v3.0 - Multi-Instance Isolated Proxy Deployment
+#  PSIPHON FLEET COMMANDER v4.0 - Docker-Based Multi-Instance Proxy Deployment
 #  Author: Engineered for x-ui-pro
-#  Purpose: Deploy N isolated Psiphon instances with zero cross-contamination
-#  Each instance runs in its own namespace with dedicated ports and country routing
+#  Purpose: Deploy N isolated Psiphon instances using Docker containers
+#  Each instance runs in its own isolated container with zero cross-contamination
+#  Docker Image: swarupsengupta2007/psiphon
 #═══════════════════════════════════════════════════════════════════════════════════════════════════
-# Note: Removed 'set -e' to prevent premature exits on non-critical failures
 trap 'echo -e "\n\033[0;31m[ABORT]\033[0m Script interrupted."; exit 130' INT
 
 # Root check
@@ -28,12 +28,10 @@ log_step()    { echo -e "${MAGENTA}[STEP]${NC} ${BOLD}$1${NC}"; }
 # Configuration
 #───────────────────────────────────────────────────────────────────────────────────────────────────
 declare -r PSIPHON_DIR="/etc/psiphon-fleet"
-declare -r BIN_PATH="${PSIPHON_DIR}/psiphon-core"
 declare -r CONFIG_DIR="${PSIPHON_DIR}/instances"
-declare -r DATA_DIR="/var/lib/psiphon-fleet"
-declare -r LOG_DIR="/var/log/psiphon-fleet"
 declare -r STATE_FILE="${PSIPHON_DIR}/fleet.state"
-declare -r BIN_URL="https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/linux/psiphon-tunnel-core-x86_64"
+declare -r DOCKER_IMAGE="swarupsengupta2007/psiphon:latest"
+declare -r CONTAINER_PREFIX="psiphon-fleet"
 
 # Available countries for Psiphon
 declare -A COUNTRY_NAMES=(
@@ -64,8 +62,8 @@ print_banner() {
 ║   ██╔═══╝ ╚════██║██║██╔═══╝ ██╔══██║██║   ██║██║╚██╗██║                     ║
 ║   ██║     ███████║██║██║     ██║  ██║╚██████╔╝██║ ╚████║                     ║
 ║   ╚═╝     ╚══════╝╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝                     ║
-║                     FLEET COMMANDER v3.0                                      ║
-║            Multi-Instance Isolated Proxy Deployment System                    ║
+║                     FLEET COMMANDER v4.0 (Docker)                             ║
+║          Containerized Multi-Instance Proxy Deployment System                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 BANNER
     echo -e "${NC}"
@@ -120,15 +118,15 @@ get_random_port() {
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-# Dependencies
+# Dependencies & Docker Setup
 #───────────────────────────────────────────────────────────────────────────────────────────────────
 install_dependencies() {
     log_step "Checking dependencies..."
-    local deps=(wget curl jq psmisc iproute2)
+    local deps=(curl jq)
     local missing=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null && ! dpkg -l "$dep" &>/dev/null 2>&1 && ! rpm -q "$dep" &>/dev/null 2>&1; then
+        if ! command -v "$dep" &>/dev/null; then
             missing+=("$dep")
         fi
     done
@@ -146,178 +144,92 @@ install_dependencies() {
     log_success "Dependencies ready"
 }
 
-#───────────────────────────────────────────────────────────────────────────────────────────────────
-# Binary Installation
-#───────────────────────────────────────────────────────────────────────────────────────────────────
-install_binary() {
-    log_step "Installing Psiphon Core binary..."
-    mkdir -p "$PSIPHON_DIR" "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+check_docker() {
+    log_step "Checking Docker installation..."
     
-    if [[ ! -f "$BIN_PATH" ]]; then
-        log_info "Downloading psiphon-tunnel-core..."
-        wget -qO "$BIN_PATH" "$BIN_URL" || curl -sSL -o "$BIN_PATH" "$BIN_URL"
-        chmod +x "$BIN_PATH"
-        log_success "Psiphon Core installed"
-    else
-        log_info "Psiphon Core already exists, checking for updates..."
-        local current_md5=$(md5sum "$BIN_PATH" 2>/dev/null | awk '{print $1}')
-        local temp_file=$(mktemp)
-        wget -qO "$temp_file" "$BIN_URL" 2>/dev/null || curl -sSL -o "$temp_file" "$BIN_URL" 2>/dev/null
-        local new_md5=$(md5sum "$temp_file" 2>/dev/null | awk '{print $1}')
+    if ! command -v docker &>/dev/null; then
+        log_warn "Docker not found. Installing Docker..."
         
-        if [[ "$current_md5" != "$new_md5" && -s "$temp_file" ]]; then
-            mv "$temp_file" "$BIN_PATH"
-            chmod +x "$BIN_PATH"
-            log_success "Psiphon Core updated"
-        else
-            rm -f "$temp_file"
-            log_info "Psiphon Core is up to date"
+        if command -v apt &>/dev/null; then
+            # Debian/Ubuntu
+            apt update -qq
+            apt install -y -qq ca-certificates gnupg lsb-release
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            apt update -qq
+            apt install -y -qq docker-ce docker-ce-cli containerd.io
+        elif command -v yum &>/dev/null; then
+            # CentOS/RHEL
+            yum install -y -q yum-utils
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y -q docker-ce docker-ce-cli containerd.io
         fi
+        
+        systemctl enable docker
+        systemctl start docker
+        log_success "Docker installed successfully"
+    else
+        log_success "Docker is already installed"
     fi
+    
+    # Verify Docker is running
+    if ! docker ps >/dev/null 2>&1; then
+        log_warn "Docker is not running. Starting Docker..."
+        systemctl start docker
+        sleep 3
+    fi
+    
+    log_success "Docker is ready"
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-# Instance Configuration Generator
+# Setup Directories
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-create_instance_config() {
-    local instance_id="$1"
-    local socks_port="$2"
-    local country="$3"
-    
-    local config_file="${CONFIG_DIR}/${instance_id}.json"
-    local data_dir="${DATA_DIR}/${instance_id}"
-    local instance_dir="${PSIPHON_DIR}/runtime/${instance_id}"
-    
-    mkdir -p "$data_dir" "$instance_dir"
-    
-    # Generate unique network ID to ensure complete isolation
-    local network_id="FLEET-${instance_id}-$(date +%s)-${RANDOM}"
-    
-    cat > "$config_file" << ENDCONFIG
-{
-    "LocalSocksProxyPort": ${socks_port},
-    "LocalHttpProxyPort": 0,
-    "LocalSocksProxyInterface": "127.0.0.1",
-    "LocalHttpProxyInterface": "127.0.0.1",
-    "EgressRegion": "${country}",
-    "DataRootDirectory": "${data_dir}",
-    "MigrateDataStoreDirectory": "${data_dir}/migrate",
-    "NetworkID": "${network_id}",
-    "PropagationChannelId": "FFFFFFFFFFFFFFFF",
-    "SponsorId": "FFFFFFFFFFFFFFFF",
-    "RemoteServerListDownloadFilename": "server_list_${instance_id}",
-    "RemoteServerListSignaturePublicKey": "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM=",
-    "RemoteServerListUrl": "https://s3.amazonaws.com/psiphon/web/mjr4-p23r-puwl/server_list_compressed",
-    "ObfuscatedServerListRootURLs": ["https://s3.amazonaws.com/psiphon/web/mjr4-p23r-puwl/server_list_compressed"],
-    "EstablishTunnelTimeoutSeconds": 300,
-    "UseIndistinguishableTLS": true,
-    "TunnelPoolSize": 2,
-    "ConnectionWorkerPoolSize": 4,
-    "LimitTunnelProtocols": ["OSSH", "SSH", "UNFRONTED-MEEK-OSSH", "UNFRONTED-MEEK-HTTPS-OSSH", "FRONTED-MEEK-OSSH"],
-    "DisableLocalHTTPProxy": true,
-    "DisableRemoteServerListFetcher": false,
-    "EmitDiagnosticNotices": true,
-    "EmitBytesTransferred": true
-}
-ENDCONFIG
-    
-    chmod 600 "$config_file"
-    log_success "Config created: ${instance_id} -> ${country}:${socks_port}"
+setup_directories() {
+    log_step "Setting up directories..."
+    mkdir -p "$PSIPHON_DIR" "$CONFIG_DIR"
+    log_success "Directories created"
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-# Systemd Service Generator - Complete Isolation
+# Docker Container Deployment
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-create_systemd_service() {
+create_docker_container() {
     local instance_id="$1"
     local socks_port="$2"
     local country="$3"
-    
-    local service_name="psiphon-fleet@${instance_id}"
-    local config_file="${CONFIG_DIR}/${instance_id}.json"
-    local log_file="${LOG_DIR}/${instance_id}.log"
-    local instance_dir="${PSIPHON_DIR}/runtime/${instance_id}"
+    local container_name="${CONTAINER_PREFIX}-${instance_id}"
     local country_name="${COUNTRY_NAMES[$country]:-$country}"
     
-    mkdir -p "$instance_dir"
+    log_info "Creating container: ${container_name} [${country_name}:${socks_port}]"
     
-    cat > "/etc/systemd/system/psiphon-fleet@${instance_id}.service" << ENDSERVICE
-[Unit]
-Description=Psiphon Fleet Instance: ${instance_id} [${country_name}] Port ${socks_port}
-Documentation=https://github.com/Psiphon-Labs/psiphon-tunnel-core
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-Type=simple
-User=root
-Group=root
-
-# Isolated working directory
-WorkingDirectory=${instance_dir}
-
-# Aggressive port cleanup before start
-ExecStartPre=/bin/bash -c '\
-    PORT=${socks_port}; \
-    fuser -k \${PORT}/tcp 2>/dev/null || true; \
-    sleep 1; \
-    if command -v ss >/dev/null 2>&1; then \
-        for pid in \$(ss -ltnp "sport = :\${PORT}" 2>/dev/null | sed -n "s/.*pid=\\([0-9]\\+\\).*/\\1/p" | sort -u); do \
-            kill -9 "\$pid" 2>/dev/null || true; \
-        done; \
-        waited=0; \
-        while ss -ltn "sport = :\${PORT}" 2>/dev/null | grep -q ":\${PORT}"; do \
-            sleep 0.5; \
-            waited=\$((waited + 1)); \
-            [[ \$waited -ge 20 ]] && break; \
-        done; \
-    fi; \
-    sleep 1; \
-    exit 0'
-
-# Main process with JSON notices for parsing
-ExecStart=${BIN_PATH} -config ${config_file} -formatNotices json
-
-# Graceful stop with timeout
-ExecStop=/bin/bash -c 'kill -TERM \$MAINPID 2>/dev/null; sleep 3; kill -9 \$MAINPID 2>/dev/null || true'
-
-# Restart policy
-Restart=always
-RestartSec=10
-TimeoutStartSec=120
-TimeoutStopSec=30
-
-# Resource limits
-LimitNOFILE=65535
-LimitNPROC=4096
-TasksMax=256
-MemoryMax=512M
-
-# Logging
-StandardOutput=append:${log_file}
-StandardError=append:${log_file}
-
-# Security hardening
-PrivateTmp=true
-NoNewPrivileges=false
-ProtectSystem=false
-ProtectHome=false
-
-# Prevent OOM killer
-OOMScoreAdjust=-500
-
-# Environment
-Environment="PSIPHON_INSTANCE_ID=${instance_id}"
-Environment="PSIPHON_COUNTRY=${country}"
-Environment="PSIPHON_PORT=${socks_port}"
-
-[Install]
-WantedBy=multi-user.target
-ENDSERVICE
-
-    chmod 644 "/etc/systemd/system/psiphon-fleet@${instance_id}.service"
+    # Stop and remove existing container if exists
+    docker stop "$container_name" 2>/dev/null || true
+    docker rm "$container_name" 2>/dev/null || true
+    
+    # Create and start the container with country routing
+    docker run -d \
+        --name "$container_name" \
+        --restart=always \
+        --memory="512m" \
+        --cpus="1.0" \
+        --network host \
+        -e COUNTRY="$country" \
+        -e SOCKS_PORT="$socks_port" \
+        --label "psiphon-fleet=true" \
+        --label "country=$country" \
+        --label "port=$socks_port" \
+        "$DOCKER_IMAGE" >/dev/null 2>&1
+    
+    if [[ $? -eq 0 ]]; then
+        log_success "Container deployed: ${container_name}"
+        return 0
+    else
+        log_error "Failed to deploy container: ${container_name}"
+        return 1
+    fi
+}
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -391,58 +303,57 @@ interactive_setup() {
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
-# Deploy All Instances
+# Deploy All Docker Containers
 #───────────────────────────────────────────────────────────────────────────────────────────────────
 deploy_fleet() {
-    log_step "Deploying Fleet with ${#FLEET_INSTANCES[@]} instances..."
+    log_step "Deploying Fleet with ${#FLEET_INSTANCES[@]} Docker containers..."
     
-    # Stop existing instances
-    log_info "Stopping any existing fleet instances..."
-    for instance_id in "${!FLEET_INSTANCES[@]}"; do
-        systemctl stop "psiphon-fleet@${instance_id}" 2>/dev/null || true
-        systemctl disable "psiphon-fleet@${instance_id}" 2>/dev/null || true
+    # Ensure Docker image is available
+    log_info "Pulling latest Psiphon Docker image..."
+    docker pull "$DOCKER_IMAGE" >/dev/null 2>&1 || {
+        log_error "Failed to pull Docker image: $DOCKER_IMAGE"
+        return 1
+    }
+    
+    # Stop and remove all existing fleet containers
+    log_info "Cleaning up existing containers..."
+    for container in $(docker ps -a --filter "label=psiphon-fleet=true" --format "{{.Names}}"); do
+        docker stop "$container" >/dev/null 2>&1
+        docker rm "$container" >/dev/null 2>&1
     done
     sleep 2
     
-    # Create all configs and services
-    log_info "Creating configurations and services..."
-    for instance_id in "${!FLEET_INSTANCES[@]}"; do
-        IFS=':' read -r country port <<< "${FLEET_INSTANCES[$instance_id]}"
-        create_instance_config "$instance_id" "$port" "$country"
-        create_systemd_service "$instance_id" "$port" "$country"
-    done
-    
-    # Reload systemd
-    systemctl daemon-reload
-    sleep 1
-    
-    # Enable all services
-    log_info "Enabling services..."
-    for instance_id in "${!FLEET_INSTANCES[@]}"; do
-        systemctl enable "psiphon-fleet@${instance_id}" >/dev/null 2>&1
-    done
-    
-    # Start services with staggered delays for isolation
-    log_info "Starting fleet with staggered delays for complete isolation..."
+    # Deploy all containers with staggered delays
+    log_info "Deploying containers with staggered delays..."
     local count=0
     local total=${#FLEET_INSTANCES[@]}
+    local failed=0
+    
     for instance_id in "${!FLEET_INSTANCES[@]}"; do
         IFS=':' read -r country port <<< "${FLEET_INSTANCES[$instance_id]}"
         count=$((count + 1))
-        echo -ne "  [${count}/${total}] Starting ${CYAN}${instance_id}${NC}..."
-        systemctl start "psiphon-fleet@${instance_id}" 2>/dev/null || true
         
-        if systemctl is-active --quiet "psiphon-fleet@${instance_id}"; then
+        echo -ne "  [${count}/${total}] Deploying ${CYAN}${instance_id}${NC} [${COUNTRY_NAMES[$country]:-$country}:${port}]..."
+        
+        if create_docker_container "$instance_id" "$port" "$country" >/dev/null 2>&1; then
             echo -e " ${GREEN}✓${NC}"
         else
-            echo -e " ${YELLOW}initializing...${NC}"
+            echo -e " ${RED}✗${NC}"
+            failed=$((failed + 1))
         fi
         
-        # Stagger starts to prevent port conflicts
-        sleep 5
+        # Stagger container starts for stability
+        sleep 3
     done
     
-    log_success "Fleet deployed successfully!"
+    echo ""
+    if [[ $failed -eq 0 ]]; then
+        log_success "All ${total} containers deployed successfully!"
+    else
+        log_warn "${failed} containers failed to deploy"
+    fi
+    
+    return 0
 }
 
 #───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -464,22 +375,24 @@ verify_fleet() {
 
 show_status() {
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                               PSIPHON FLEET STATUS                                       ║${NC}"
+    echo -e "${CYAN}║                          PSIPHON FLEET STATUS (Docker)                                   ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    printf "${WHITE}%-28s %-12s %-10s %-8s %-18s %-10s${NC}\n" "INSTANCE ID" "COUNTRY" "STATUS" "PORT" "EXIT IP" "VERIFIED"
+    printf "${WHITE}%-28s %-12s %-10s %-8s %-18s %-10s${NC}\n" "CONTAINER" "COUNTRY" "STATUS" "PORT" "EXIT IP" "VERIFIED"
     echo "─────────────────────────────────────────────────────────────────────────────────────────────"
     
     for instance_id in "${!FLEET_INSTANCES[@]}"; do
         IFS=':' read -r country port <<< "${FLEET_INSTANCES[$instance_id]}"
+        local container_name="${CONTAINER_PREFIX}-${instance_id}"
         local status="DOWN"
         local status_color="${RED}"
         local exit_ip="N/A"
         local exit_country="N/A"
         local verified="${RED}✗${NC}"
         
-        if systemctl is-active --quiet "psiphon-fleet@${instance_id}"; then
+        # Check if container is running
+        if docker ps --filter "name=^${container_name}$" --format "{{.Names}}" | grep -q "^${container_name}$"; then
             status="UP"
             status_color="${GREEN}"
             
@@ -639,17 +552,22 @@ control_fleet() {
             return 1
         fi
         
+        local container_name="${CONTAINER_PREFIX}-${target}"
         log_info "${action^}ing $target..."
-        systemctl "$action" "psiphon-fleet@${target}"
+        docker "$action" "$container_name" 2>/dev/null || {
+            log_error "Failed to ${action} ${target}"
+            return 1
+        }
         log_success "$target ${action}ed"
     else
         # All instances
-        log_info "${action^}ing all fleet instances..."
+        log_info "${action^}ing all fleet containers..."
         for instance_id in "${!FLEET_INSTANCES[@]}"; do
-            systemctl "$action" "psiphon-fleet@${instance_id}" 2>/dev/null || true
-            [[ "$action" == "start" ]] && sleep 3
+            local container_name="${CONTAINER_PREFIX}-${instance_id}"
+            docker "$action" "$container_name" 2>/dev/null || true
+            [[ "$action" == "start" ]] && sleep 2
         done
-        log_success "All instances ${action}ed"
+        log_success "All containers ${action}ed"
     fi
 }
 
@@ -658,32 +576,37 @@ show_logs() {
     local lines="${2:-50}"
     
     if [[ -z "$instance" ]]; then
-        # Show combined logs
-        log_info "Showing last $lines lines from all instances..."
-        tail -n "$lines" ${LOG_DIR}/*.log 2>/dev/null | head -200
+        # Show combined logs from all containers
+        log_info "Showing last $lines lines from all containers..."
+        for instance_id in "${!FLEET_INSTANCES[@]}"; do
+            local container_name="${CONTAINER_PREFIX}-${instance_id}"
+            echo -e "\n${CYAN}=== ${container_name} ===${NC}"
+            docker logs --tail "$lines" "$container_name" 2>/dev/null || echo "No logs available"
+        done
     else
         if [[ -z "${FLEET_INSTANCES[$instance]}" ]]; then
             log_error "Instance '$instance' not found"
             return 1
         fi
+        local container_name="${CONTAINER_PREFIX}-${instance}"
         log_info "Showing last $lines lines from $instance..."
-        tail -n "$lines" "${LOG_DIR}/${instance}.log" 2>/dev/null
+        docker logs --tail "$lines" "$container_name" 2>/dev/null || echo "No logs available"
     fi
 }
 
 uninstall_fleet() {
     log_warn "Uninstalling Psiphon Fleet..."
-    read -rp "Are you sure? This removes ALL instances and data (y/N): " confirm
+    read -rp "Are you sure? This removes ALL containers and data (y/N): " confirm
     [[ ! "$confirm" =~ ^[Yy]$ ]] && { log_info "Cancelled."; return; }
     
-    for instance_id in "${!FLEET_INSTANCES[@]}"; do
-        systemctl stop "psiphon-fleet@${instance_id}" 2>/dev/null || true
-        systemctl disable "psiphon-fleet@${instance_id}" 2>/dev/null || true
-        rm -f "/etc/systemd/system/psiphon-fleet@${instance_id}.service"
+    # Stop and remove all fleet containers
+    for container in $(docker ps -a --filter "label=psiphon-fleet=true" --format "{{.Names}}"); do
+        docker stop "$container" 2>/dev/null || true
+        docker rm "$container" 2>/dev/null || true
     done
     
-    systemctl daemon-reload
-    rm -rf "$PSIPHON_DIR" "$DATA_DIR" "$LOG_DIR"
+    # Clean up directories
+    rm -rf "$PSIPHON_DIR"
     
     log_success "Fleet uninstalled completely"
 }
@@ -747,12 +670,7 @@ add_instance() {
     FLEET_INSTANCES["$instance_id"]="${country}:${port}"
     save_state
     
-    create_instance_config "$instance_id" "$port" "$country"
-    create_systemd_service "$instance_id" "$port" "$country"
-    
-    systemctl daemon-reload
-    systemctl enable "psiphon-fleet@${instance_id}"
-    systemctl start "psiphon-fleet@${instance_id}"
+    create_docker_container "$instance_id" "$port" "$country"
     
     log_success "Added and started: $instance_id (${COUNTRY_NAMES[$country]} on port $port)"
 }
@@ -767,7 +685,8 @@ main() {
     case "${1:-}" in
         install)
             install_dependencies
-            install_binary
+            check_docker
+            setup_directories
             interactive_setup
             deploy_fleet
             verify_fleet
@@ -791,7 +710,7 @@ main() {
         add)
             [[ -z "$2" ]] && { log_error "Usage: $0 add <country_code>"; exit 1; }
             install_dependencies
-            install_binary
+            check_docker
             add_instance "$2"
             ;;
         uninstall)
