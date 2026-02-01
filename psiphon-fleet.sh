@@ -206,22 +206,29 @@ create_docker_container() {
     # Create config directory for this instance
     mkdir -p "$config_volume"
     
+    # Remove any existing config to force fresh start with new egress region
+    rm -f "${config_volume}/psiphon.config" 2>/dev/null
+    
     log_info "Creating container: ${container_name} [${country_name}:${socks_port}]"
     
     # Stop and remove existing container if exists
     docker stop "$container_name" 2>/dev/null || true
     docker rm "$container_name" 2>/dev/null || true
     
-    # Create and start the container with country routing and mounted config
+    # Create and start the container with proper port mapping and environment
+    # Internal ports: 1080 (SOCKS), 8080 (HTTP) mapped to host ports
     docker run -d \
         --name "$container_name" \
         --restart=always \
         --memory="512m" \
         --cpus="1.0" \
-        --network host \
+        -p "${socks_port}:1080" \
         -v "$config_volume:/config" \
-        -e COUNTRY="$country" \
-        -e SOCKS_PORT="$socks_port" \
+        -e PUID=1000 \
+        -e PGID=1000 \
+        -e SOCKS_PORT=1080 \
+        -e HTTP_PORT=8080 \
+        -e EGRESS_REGION="$country" \
         --label "psiphon-fleet=true" \
         --label "country=$country" \
         --label "port=$socks_port" \
