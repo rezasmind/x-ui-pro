@@ -246,6 +246,9 @@ interactive_setup() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
+    # Clear existing fleet configuration for fresh install
+    FLEET_INSTANCES=()
+    
     # Show available countries in a clean grid format
     echo -e "${WHITE}Available Countries:${NC}"
     echo ""
